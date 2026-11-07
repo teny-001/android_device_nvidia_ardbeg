@@ -1,38 +1,41 @@
+# ===========================================================================
+# comms.te —— ardbeg / g100 的 BT + WiFi + GPS 策略补充
+#
+# 【7.1 移植改动 2026-11-04】删掉了整个 wifi_loader 段落
+#
+#   原 cm-11 版本的这个文件里有一大段：
+#       type wifi_loader, domain;
+#       type wifi_loader_exec, exec_type, file_type;
+#       init_daemon_domain(wifi_loader)
+#       allow wifi_loader ... （二十多条）
+#
+#   但 7.1 的 BOARD_SEPOLICY_DIRS（BoardConfig.mk 第 199~202 行）已经包含
+#       device/nvidia/shield-common/sepolicy/common
+#   而这个目录下的 wifi_loader.te 里有**更完整**的同名定义 —— 它是 NVIDIA
+#   2016 年为 7.1 更新的版本，比 4.4 那份多了：
+#       set_prop(wifi_loader, system_prop)
+#       toolbox_exec / sysfs_wifi / system_file:execute_no_trans
+#       factory_file（读 /mnt/factory 下的 MAC 地址）
+#       sysfs_mmc_host / sysfs_pci_device
+#       bluetooth_log_file / tmpfs:dir
+#
+#   两处同时声明同一个 type，checkpolicy 会直接失败：
+#       device/nvidia/ardbeg/sepolicy/comms.te:12:ERROR
+#           'duplicate declaration of type/attribute' at token ';'
+#       checkpolicy: error(s) encountered while parsing configuration
+#
+#   所以这里只保留 shield-common 里没有、而 ardbeg 确实需要的三条。
+#   （selinux 里重复的 allow 规则只是冗余、不报错，但重复的 type 声明是硬错误。）
+#
+#   另外 device/nvidia/ardbeg/sepolicy_aosp/wifi_loader.te 里还有一份，
+#   不过那个目录不在 BOARD_SEPOLICY_DIRS 里，不参与编译，无需处理。
+# ===========================================================================
+
 # BT sysfs permissions /sys/class/rfkill/rfkill0/state
 allow bluetooth sysfs:file write;
 
 # gpsd - permissions to read/write sys GPIO interface
 allow gpsd sysfs:file write;
 
-#allow hostapd to access symlinks created by wifi_loader
+# allow hostapd to access symlinks created by wifi_loader
 allow hostapd wifi_data_file:lnk_file read;
-
-# wifi_loader - wifi loader which modifies /data/misc/wifi/*
-type wifi_loader, domain;
-type wifi_loader_exec, exec_type, file_type;
-
-init_daemon_domain(wifi_loader)
-
-allow wifi_loader shell_exec:file rx_file_perms;
-allow wifi_loader wifi_loader_exec:file { execute_no_trans open };
-allow wifi_loader wifi_data_file:file create_file_perms;
-allow wifi_loader wifi_data_file:dir rw_dir_perms;
-allow wifi_loader wifi_data_file:lnk_file { getattr read write create_file_perms };
-allow wifi_loader bluetooth_data_file:dir { search write add_name };
-allow wifi_loader bluetooth_data_file:lnk_file { write create_file_perms };
-allow wifi_loader gps_data_file:dir { search write add_name };
-allow wifi_loader gps_data_file:lnk_file { write create_file_perms };
-allow wifi_loader hci_attach_dev:chr_file { setattr getattr };
-allow wifi_loader gps_device:chr_file { setattr getattr };
-allow wifi_loader device:chr_file { setattr };
-allow wifi_loader devpts:chr_file { read write ioctl };
-allow wifi_loader kernel:system module_request;
-allow wifi_loader self:capability { net_admin dac_override chown sys_module fowner fsetid };
-allow wifi_loader system_prop:property_service set;
-allow wifi_loader property_socket:sock_file write;
-allow wifi_loader sysfs:file read;
-allow wifi_loader system_file:file { execute_no_trans };
-allow wifi_loader proc_wmem_default_writable:file w_file_perms;
-allow wifi_loader proc_wmem_max_writable:file w_file_perms;
-
-type_transition wifi_loader wifi_data_file:sock_file wpa_socket;

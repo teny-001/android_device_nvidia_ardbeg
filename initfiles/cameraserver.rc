@@ -1,0 +1,35 @@
+# ============================================================================
+# cameraserver 服务定义 —— CM14.1-on-ardbeg 定制版
+#
+# 与 AOSP 7.1 原版（frameworks/av/camera/cameraserver/cameraserver.rc）的
+# 唯一差别是多了一行：
+#
+#     seclabel u:r:mediaserver:s0
+#
+# 【为什么需要这一行】
+#
+# 和 audioserver 完全同因（详细推导见 initfiles/audioserver.rc 头部）：
+# 4.4.4 的策略里没有 cameraserver 域（4.4.4 的相机在 mediaserver 里），
+# init 调 security_compute_create() 算不出域，直接放弃启动：
+#
+#     init: could not get context while starting 'cameraserver'
+#
+# 后果是 system_server 里 CameraManagerGlobal 反复打印：
+#
+#     E/CameraManagerGlobal(1600): Camera service is unavailable
+#
+# 这条本身不是致命（相机服务缺席不会阻止开机），但每次 system_server 启动
+# 都会卡几秒等超时，拖慢整体启动，而且相机功能彻底不可用。
+#
+# 【为什么选 mediaserver 域】
+#
+# 同 audioserver：4.4.4 策略里有 mediaserver 域，实测可用。
+# 长期正解同样是 patch system/core/init/service.cpp 让它容错，然后删掉这行。
+# ============================================================================
+service cameraserver /system/bin/cameraserver
+    class main
+    user cameraserver
+    group audio camera input drmrpc
+    ioprio rt 4
+    seclabel u:r:mediaserver:s0
+    writepid /dev/cpuset/camera-daemon/tasks /dev/stune/top-app/tasks

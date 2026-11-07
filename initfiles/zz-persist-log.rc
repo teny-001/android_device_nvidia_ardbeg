@@ -1,0 +1,168 @@
+# ============================================================================
+# [CM14.1 on ardbeg 新增 2026-11-05] ========= 全程持久化日志 =========
+#
+# 安装位置：/system/etc/init/zz-persist-log.rc
+#           （由 initfiles/Android.mk 里的 zz-persist-log.rc 模块安装）
+#
+# 【为什么需要这个文件】
+#   同目录树里的 init.tegra.rc 已经有一个 bootlog_logcat 服务，
+#   但它在 on property:sys.boot_completed=1 时会 stop，
+#   结果"开机之后才发生"的问题完全抓不到。本机上真实踩过的两个例子：
+#       * SurfaceFlinger 开机约 74 秒后每 16 秒 SIGSEGV 一次
+#       * system_server 起来 30 秒后 DeadSystemException 秒退
+#   这两个都发生在 boot_completed 之后，/cache/boot_log.txt 里一个字都没有，
+#   每次只能靠 logcat 环形缓冲碰运气（一崩就滚没了）。
+#   所以再加一条**永不停止**的落盘服务。
+#
+# ----------------------------------------------------------------------------
+# 【关键机制：/system/etc/init/*.rc 到底是怎么被加载的】
+#
+#   一开始以为 7.1 会像 8.0 那样在 init.rc 里写 "import /system/etc/init"，
+#   但查了源码并不是 —— 本机 /init.rc 只有这 6 条 import：
+#       import /init.environ.rc
+#       import /init.usb.rc
+#       import /init.${ro.hardware}.rc      -> /init.ardbeg.rc
+#       import /init.usb.configfs.rc
+#       import /init.${ro.zygote}.rc        -> /init.zygote32.rc
+#       import /init.cm.rc
+#   顺着 /init.ardbeg.rc 往下（init.cal / init.tegra / init.tegra_emmc /
+#   init.t124 / init.ray_touch），也没有任何一条指向 /system/etc/init。
+#
+#   真正的入口是 init.ardbeg.rc 第 16 行的
+#       mount_all /fstab.ardbeg
+#   对应 system/core/init/builtins.cpp 的 do_mount_all()：
+#       int ret = mount_fstab(fstabfile, mount_mode);   // 先挂载
+#       if (import_rc) {
+#           import_late(args, 2, path_arg_end);         // 再解析 rc
+#       }
+#   而 import_late()（同文件 524-542 行）在**没有给路径参数**时，
+#   会遍历这个硬编码列表：
+#       static const std::vector<std::string> init_directories = {
+#           "/system/etc/init",
+#           "/vendor/etc/init",
+#           "/odm/etc/init"
+#       };
+#   逐个 Parser::ParseConfig(dir) —— 目录走 ParseConfigDir()，
+#   readdir 出所有 DT_REG 普通文件、按文件名排序后依次解析
+#   （init_parser.cpp 117-142 行）。
+#
+#   => 结论：只要 mount_all 后面**不跟路径参数**，/system/etc/init 就会被加载。
+#      本机 mount_all 就是这么写的，所以新建一个 .rc 放进去即可生效。
+#      （反过来说：如果哪天把 mount_all 改成 "mount_all /fstab.ardbeg /fstab.xxx"
+#        这种带路径的形式，/system/etc/init 就整个不加载了，
+#        audioserver / servicemanager / surfaceflinger 全都会没了 —— 切记。）
+#
+#   【实测佐证】audioserver、servicemanager、logd 这三个服务在 /init.rc 和
+#   设备树的所有 rc 里都没有定义，只在 /system/etc/init/*.rc 里有，
+#   而 getprop init.svc.audioserver 返回 running —— 说明该目录确实被解析了。
+#
+# ----------------------------------------------------------------------------
+# 【为什么 class late_start + disabled】
+#   /cache 是在 init.ardbeg.rc 的 "on fs" 里由 mount_all 挂上的。
+#   服务如果按 class 自动启动，可能在 /cache 还没挂时就跑，
+#   logcat -f 会因为打不开输出文件直接退出。
+#   disabled 让它不参与自动启动，由下面的 on post-fs-data 精确控制时机。
+#   注意本文件是在 "on fs" 阶段（mount_all 那一刻）才被解析的，
+#   而 post-fs-data 在其后，所以下面这个 on post-fs-data 段一定会被触发。
+#
+# 【轮转】
+#   -r 4096 -n 4 => 每个文件 4MB，共 4 个（persist_log.txt[.1..3]），
+#   最多占 /cache 16MB。/cache 有 768MB，足够。
+#   没有轮转的话 boot loop 会把 /cache 写满，然后 /cache 满了会连
+#   recovery 的 OTA 包都放不下。
+#
+# 【-D 是什么】（这里踩过一次坑，记录清楚）
+#   logcat 的 -D 是 printDividers（缓冲区之间打印分隔线），
+#   **不是**"输出到 stderr"，可以和 -f 一起用，不会影响写文件。
+#   见 system/core/logcat/logcat.cpp 的 getopt 分支 case 'D'。
+#   加它只是为了日志里能看出不同 buffer 的分界，纯属可读性。
+#
+# ----------------------------------------------------------------------------
+# 【2026-11-07 修复：为什么这个服务曾经一次都没起来过】
+#
+#   上面那条「实测 running」是 1105 早期记录的乐观结论，1107 用
+#   tools/full_function_test.sh 做全面功能测试时被证伪：
+#       FAIL  /cache/persist_log.txt 非空: 实际[0] 期望[1]
+#   实测状态（三项互相印证）：
+#       getprop init.svc.persist_logcat  -> 空（属性根本不存在，不是 stopped）
+#       /cache/persist_log.txt          -> 不存在
+#       dmesg                           -> init: could not get context
+#                                          while starting 'persist_logcat'
+#
+#   【先排除的伪因】直接手动执行同一条命令：
+#       logcat -b all -D -f /cache/fft_probe_log.txt -r 4096 -n 4
+#   能正常写文件并轮转（实测 .txt + .1 + .2 共 8MB+），说明 logcat 参数、
+#   /cache 挂载、root 权限、-r/-n 轮转全都没问题。问题只在 init 启动路径。
+#
+#   【真因：4.4.4 sepolicy 里没有 logcat_exec 这个 type】
+#   system/core/init/service.cpp:346-388 的 Service::Start()：
+#       if (!seclabel_.empty()) { scon = seclabel_; }        // 347-348 行
+#       else {
+#           getcon(&mycon);
+#           getfilecon(args_[0].c_str(), &fcon);              // 360 行
+#           rc = security_compute_create(mycon, fcon,
+#                    string_to_security_class("process"), &ret_scon);  // 368 行
+#           ...
+#           if (rc < 0) {
+#               ERROR("could not get context while starting '%s'\n", ...);
+#               return false;                                // 384-387 行
+#           }
+#       }
+#   实机 `ls -Z` 的对照证据（这是最关键的一手数据）：
+#       u:object_r:logcat_exec:s0  /system/bin/logcat   <- 7.1 file_contexts 打的标签
+#       u:object_r:lmkd_exec:s0    /system/bin/lmkd     <- 同理，7.1 才有
+#       u:object_r:shell_exec:s0   /system/bin/sh       <- 4.4.4 就有
+#   本机 kernel 是原厂 4.4.4，根分区 /sepolicy 只有 307 types / 84 classes /
+#   3023 rules、policyvers=28，里面**没有 logcat_exec**，自然也没有
+#   `init -> logcat_exec : process transition` 规则，security_compute_create()
+#   直接返回 -1，服务连 fork() 都走不到（390 行之后才 fork）。
+#
+#   【对照组解释】为什么 ardbeg_homewd / sf_hwc_off 不加 seclabel 也能 running：
+#   它们的 args_[0] 是 /system/bin/sh（shell_exec:s0，旧 policy 认识），
+#   计算能成功。而 audioserver / cameraserver / mediacodec / mediaextractor /
+#   lmkd 的可执行文件都是 7.1 新增标签，所以那五个 rc 早就统一加了
+#   `seclabel u:r:mediaserver:s0` —— 本文件是**唯一漏掉的那一个**。
+#
+#   【为什么 SELinux Permissive 也救不了】
+#   getenforce = Permissive 只影响内核是否拦截访问。而 384-387 行这个
+#   `if (rc < 0) return false` 是 init 用户态的硬失败，不看 enforcing 状态；
+#   只有 374-380 行那种「scon == mycon」(Service ... does not have a SELinux
+#   domain defined) 才会去查 selinux_status_getenforce()。所以别指望
+#   permissive / libselinux_bypass.so 垫片能绕过这一条。
+#
+#   【修法】写死 seclabel，让 init 走 347-348 行的短路分支，完全不调用
+#   security_compute_create()。选 u:r:init:s0 的理由：
+#     * 4.4.4 policy 里确实存在（实机 ps -Z 里 logd 进程就跑在该域）；
+#     * init 域权限最宽，写 /cache、读 logd buffer 都不需要额外 allow；
+#     * 语义上等价于「不切域」，比塞进 mediaserver 域更符合 logcat 的身份。
+#   （另四个 media 服务用 mediaserver:s0 是因为它们要共享 media 资源，
+#     与这里不矛盾。）
+#
+#   【实测（修复后）】init.svc.persist_logcat = running，
+#       /cache/persist_log.txt 持续增长并正常轮转。
+# ============================================================================
+
+service persist_logcat /system/bin/logcat -b all -D -f /cache/persist_log.txt -r 4096 -n 4
+    class late_start
+    user root
+    # root 本身不受 /dev/log 权限限制；带 log 组是为了以后改成非 root 也能读
+    group root system log
+    # 【必须有这一行】/system/bin/logcat 的 file context 是 7.1 才有的
+    # logcat_exec，4.4.4 sepolicy 里没有该 type，不加 seclabel 的话 init 会在
+    # security_compute_create() 上失败并打出
+    #   init: could not get context while starting 'persist_logcat'
+    # 服务连 fork 都到不了、init.svc.persist_logcat 属性压根不会出现。
+    # 完整推导见本文件头部「2026-11-07 修复」一节。
+    seclabel u:r:init:s0
+    disabled
+
+on post-fs-data
+    # 清掉上一轮残留：logcat -f 是追加模式，不清会把两次开机混在一起，
+    # 排查崩溃时会看到上一次开机的旧日志，极易误判。
+    # rm 一个不存在的文件在 init 里不算错误（builtin 返回成功），
+    # 所以不用先判断存在性。
+    rm /cache/persist_log.txt
+    rm /cache/persist_log.txt.1
+    rm /cache/persist_log.txt.2
+    rm /cache/persist_log.txt.3
+    start persist_logcat

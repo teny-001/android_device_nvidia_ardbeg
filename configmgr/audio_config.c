@@ -25,6 +25,13 @@
 #include <cutils/properties.h>
 #include <cutils/compiler.h>
 #include <ctype.h>
+/* ---------------------------------------------------------------------------
+ * [新增 2026-10-28] 为了支持在 XML 里用「声卡名」而不是「声卡序号」指定声卡
+ * （见下面的 card_index_from_attr()）。需要 fopen/fgets 读 /proc/asound/cards，
+ * 以及 strchr/strstr/strlen 处理字符串。
+ * ------------------------------------------------------------------------- */
+#include <stdio.h>
+#include <string.h>
 
 #include <system/audio.h>
 
@@ -1413,6 +1420,110 @@ static int attrib_to_uint(uint32_t *result, struct parse_state *state,
     return string_to_uint(result, str);
 }
 
+/* ===========================================================================
+ * [新增 2026-10-28] 声卡按「名字」定位
+ *
+ * 背景 / 为什么必须加：
+ *   这份 HAL 原来只支持在 XML 里写死 <mixer card="1"> / <stream card="1">，
+ *   也就是「声卡序号」。而序号是内核按 probe 顺序分配的，不是硬件属性：
+ *     - 小米平板1（本配置的来源）上 WM8994 恰好排到 card1；
+ *     - g100(ardbeg) 上 ASoC 注册的是 tegra-snd-rt5639（从官方 DTB 里
+ *       的 compatible 串可以确认），序号可能是 0，而且 HDMI/SPDIF 等
+ *       其它 card 也会占号，顺序随内核配置变化。
+ *   一旦序号对不上，mixer_open() 失败 -> parse_mixer_start() 返回 -EINVAL
+ *   -> init_audio_config() 失败 -> audio.primary.tegra 打不开 -> 整机无声。
+ *   所以这里允许 XML 里直接写声卡名（如 card="tegra-snd-rt5639"），
+ *   运行时去 /proc/asound/cards 查真实序号。
+ *
+ * 兼容性：属性值是纯数字时，行为与原来完全一致。
+ * =========================================================================== */
+
+/* 在 /proc/asound/cards 里按子串找声卡，返回序号；找不到返回 -1。
+ * 该文件格式大致是：
+ *      0 [tegra-snd-rt563]: tegra-snd-rt5639 - tegra-snd-rt5639
+ *      1 [Tegra            ]: ...
+ * 方括号里的名字会被右对齐补空格，所以取出来后要去掉尾部空格。
+ */
+static int card_index_by_name(const char *name)
+{
+    FILE *f;
+    char line[256];
+    int idx;
+
+    f = fopen("/proc/asound/cards", "r");
+    if (!f) {
+        ALOGE("Cannot open /proc/asound/cards: %s", strerror(errno));
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, " %d [", &idx) != 1)
+            continue;
+
+        /*
+         * 在**整行**里做子串匹配，不要只匹配 '[' ']' 之间的内容。
+         * /proc/asound/cards 的格式是：
+         *     0 [tegra-snd-rt563]: tegra-snd-rt5639 - tegra-snd-rt5639
+         *                             ^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^
+         *                             driver 名字        完整 card 名字
+         * 方括号里的是 card->id，内核里被截断到 16 个字符，
+         * "tegra-snd-rt5639" 刚好 16 个字符、稍长一点就会被截掉尾巴，
+         * 只匹配方括号会失败。']' 后面的长名字才是完整的，所以搜整行。
+         */
+        if (strstr(line, name)) {
+            fclose(f);
+            return idx;
+        }
+    }
+
+    fclose(f);
+    return -1;
+}
+
+/* 解析 e_attrib_card：
+ *   - 属性没写  -> 保持 *result 原值（调用方已填好默认值）
+ *   - 纯数字    -> 当作序号，走原来的 attrib_to_uint
+ *   - 其它      -> 当作声卡名去查
+ */
+static int card_index_from_attr(uint32_t *result, struct parse_state *state)
+{
+    const char *str = state->attribs.value[e_attrib_card];
+    int idx;
+
+    if (!str || !str[0])
+        return 0;
+
+    if (isdigit((unsigned char)str[0])) {
+        return attrib_to_uint(result, state, e_attrib_card);
+    }
+
+    idx = card_index_by_name(str);
+    if (idx < 0) {
+        /*
+         * [重要] 这里**绝对不能**返回 -EINVAL。
+         *
+         * 调用方 parse_mixer_start() 一旦返回非 0，do_parse() 就会
+         * parse_set_error() 并停止解析整个 XML；而 <device>/<stream>
+         * 的放行恰恰是 parse_mixer_start() 成功之后才做的
+         * （见那句 "Now we can allow all other root elements"）。
+         * 也就是说 mixer 打不开 = 后面所有 device/stream 都不会被创建
+         * = 音频 HAL 一条通路都没有 = 彻底没声音，而且日志里只有一条
+         * 看不懂的 "Element 'device' not allowed here"。
+         *
+         * 声卡名对不上，最多只是声卡编号可能和预期不同；退回到默认
+         * card（MIXER_CARD_DEFAULT/PCM_CARD_DEFAULT，都是 0）
+         * 远比让整份配置作废要好。
+         */
+        ALOGW("Sound card name \"%s\" not found in /proc/asound/cards, "
+              "fall back to default card %u", str, *result);
+        return 0;
+    }
+
+    ALOGI("Sound card \"%s\" resolved to card %d", str, idx);
+    *result = (uint32_t)idx;
+    return 0;
+}
+
 static int make_byte_array(struct ctl *c, struct mixer_ctl *ctl)
 {
     const char *val_str = c->value.string;
@@ -2000,7 +2111,8 @@ static int parse_stream_start(struct parse_state *state)
         return -EINVAL;
     }
 
-    if (attrib_to_uint(&card, state, e_attrib_card) == -EINVAL) {
+    /* [修改 2026-10-28] 同 <mixer>，这里也允许写声卡名 */
+    if (card_index_from_attr(&card, state) == -EINVAL) {
         return -EINVAL;
     }
 
@@ -2109,7 +2221,9 @@ static int parse_mixer_start(struct parse_state *state)
 
     ALOGV("parse_mixer_start");
 
-    if (attrib_to_uint(&card, state, e_attrib_card) == -EINVAL) {
+    /* [修改 2026-10-28] 原来固定按序号解析，现在允许写声卡名，
+     * 实现见文件前面的 card_index_from_attr() */
+    if (card_index_from_attr(&card, state) == -EINVAL) {
         return -EINVAL;
     }
 

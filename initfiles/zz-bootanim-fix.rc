@@ -1,0 +1,55 @@
+# ============================================================================
+# [CM14.1 on ardbeg 新增 2026-11-05] ===== 开机动画看门狗 =====
+#
+# 安装位置：/system/etc/init/zz-bootanim-fix.rc
+#           （由 initfiles/Android.mk 里的 zz-bootanim-fix.rc 模块安装）
+# 配套脚本：/system/bin/bootanim_killer.sh
+#           （由 initfiles/Android.mk 里的 bootanim_killer.sh 模块安装）
+#
+# 为什么 /system/etc/init 下的 rc 会被加载，见 zz-persist-log.rc 顶部的
+# 「关键机制」一节（一句话：mount_all 不带路径参数时会 import_late 该目录）。
+#
+# ----------------------------------------------------------------------------
+# 【要解决的问题】SF 重启后开机动画永久盖住桌面
+#
+#   正常流程本来是自洽的：
+#       SurfaceFlinger::bootFinished()            -> sf_stop_bootanim()
+#       WindowManagerService.performEnableScreen() -> service.bootanim.exit=1
+#       bootanimation 主循环读到 exit=1，退出（dmesg 可见 exited with status 0）
+#
+#   但本机上 SurfaceFlinger 会因为厂商 4.4.4 hwcomposer.tegra.so 的堆越界
+#   在开机约 74 秒时崩一次（根因与修法见 patches/README.md 的
+#   「hwcomposer.tegra.so 二次释放」专章 + patches/tools/patch_hwc.py）。
+#   init 重启 SF 之后，新 SF 的 onFirstRef() 会再走一遍 startBootAnimation()：
+#       property_set("service.bootanim.exit", "0");
+#       property_set("ctl.start", "bootanim");
+#   而 WindowManagerService 里的 mBootAnimationStopped 是一次性标志，
+#   开机那次已经置位，不会再调 performEnableScreen() 把 exit 设回 1。
+#   => bootanimation 被重新拉起后永远不退出，桌面被它盖住。
+#      （表现为"系统明明起来了、mCurrentFocus 是 Launcher、截图却是黑的"。）
+#
+# 【为什么不能靠改 WindowManagerService 解决】
+#   mBootAnimationStopped 的语义就是"只停一次"，改成可重入会影响
+#   performEnableScreen / enableScreenAfterBoot 的正常时序，
+#   而且需要重编 frameworks/base。用属性看门狗是零源码改动的等价修法：
+#   bootanimation 每帧都会读 service.bootanim.exit，读到 1 就自己退。
+#
+# 【为什么用独立脚本而不是 init 的 on property 一次性 setprop】
+#   一次性 setprop 只能顶住第一次。SF 可能重启多次（实测本机开机后
+#   118 秒还崩过一次），每次都把 exit 置回 0，所以需要常驻轮询。
+#   脚本见 bootanim_killer.sh 顶部注释。
+#
+# 【为什么脚本放 /system/bin 而不是 /system/etc】
+#   init 拉起它用的是 /system/bin/sh，脚本本身只需要可读。
+#   但 LOCAL_MODULE_CLASS 用 EXECUTABLES 装到 bin 下会自动给 0755，
+#   跟 bootlog.sh 的做法保持一致，省掉在 file-modes.txt 里另记一笔权限。
+# ============================================================================
+
+service bootanim_killer /system/bin/sh /system/bin/bootanim_killer.sh
+    class late_start
+    user root
+    group root
+    disabled
+
+on property:sys.boot_completed=1
+    start bootanim_killer

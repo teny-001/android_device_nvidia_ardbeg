@@ -1,0 +1,36 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 新增 2026-11-06] 首次开机收尾服务
+#
+# 跑 zz-ardbeg-firstboot-fix.sh，做三件事：
+#   1. 禁用 com.cyanogenmod.setupwizard（缺 setupwraith 会无限崩）
+#   2. 标记 device_provisioned=1，让 AMS 去启动 Trebuchet
+#   3. 设亮度/超时/解屏/唤醒，把 display 从 OFF 翻到 ON
+#
+# 完整推导见 zz-ardbeg-firstboot-fix.sh 头部注释。
+#
+# 【为什么用 late_start 而不是 on boot / post-fs-data】
+#   late_start 在 on boot 之后、system_server 起来之后启动，
+#   此时 pm / settings / am 这些命令才可能连上。
+#   但首次开机时 system_server 还没完全就绪，所以脚本内部
+#   还会轮询 `pm path android` 直到 PMS 可用（最多 240 秒）。
+#
+# 【为什么用 oneshot】
+#   脚本跑完就退出。不加 oneshot 的话 init 会把它当常驻服务，
+#   一退出就重新拉起 —— wifiloader 就是这个坑（init.comms.rc 里
+#   那个 service 没有 oneshot，实测每 5 秒重启一次，已重启 115 次）。
+#
+# 【为什么 user/group 都是 root】
+#   pm disable、settings put secure、wm dismiss-keyguard 都要
+#   system 权限，本机是 eng 版本，root 直接够用。
+#
+# 【这个脚本可以反复跑】
+#   所有操作都是幂等的：pm disable 第二次会返回 "already disabled"，
+#   settings put 是覆盖写，am start HOME 重复调用只会把桌面提到前台。
+#   所以调试时直接 `setprop ctl.start fb_fix` 就能重跑一遍。
+# =============================================================================
+
+service fb_fix /system/bin/sh /system/bin/zz-ardbeg-firstboot-fix.sh
+    class late_start
+    user root
+    group root system
+    oneshot

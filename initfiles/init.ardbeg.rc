@@ -34,5 +34,19 @@ on boot
 
 on init
     # Mount a tmpfs into /mnt/tmp for hosting nvram, phs shared memory
+    # ------------------------------------------------------------------------
+    # [确认 2026-10-28] 本文件第 12 行 import 的 init.t124.rc 里有一模一样
+    #   的 "on init" 段（mkdir /mnt/tmp + mount tmpfs），会造成重复挂载。
+    #
+    #   为什么保留这里的、注释掉 init.t124.rc 里的：
+    #   init_parser.c 的 parse_config() 是先把**本文件**的所有 action 按出现
+    #   顺序注册进 action_list，等整个文件解析完，才在 parser_done 标签那里
+    #   用 list_for_each 逐个 init_parse_config_file() 去处理 import。
+    #   所以执行顺序是：
+    #       1) init.ardbeg.rc 的 on init   <- 先执行，挂载成功
+    #       2) init.t124.rc 的 on init     <- 后执行，撞上 EBUSY 失败
+    #   也就是说留下本文件这份才是对的，见 init.t124.rc 里对应的注释。
+    # ------------------------------------------------------------------------
     mkdir /mnt/tmp 0770 system system
     mount tmpfs tmpfs /mnt/tmp mode=0775,gid=1003
+

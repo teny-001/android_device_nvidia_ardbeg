@@ -1,43 +1,60 @@
-on early-init
-    start ueventd
-
-on init
-    export PATH /sbin
-    export ANDROID_ROOT /system
-    export ANDROID_DATA /data
-    export EXTERNAL_STORAGE /sdcard
-
-    symlink /system/etc /etc
-
-    mkdir /sdcard
-    mkdir /system
-    mkdir /data
-    mkdir /cache
-    mkdir /misc
-    mount /tmp /tmp tmpfs
-
-    mount ext4 /dev/block/platform/sdhci-tegra.3/by-name/APP /system wait ro remount
-    mount ext4 /dev/block/platform/sdhci-tegra.3/by-name/UDA /data wait noatime nosuid nodev
-    mount ext4 /dev/block/platform/sdhci-tegra.3/by-name/CAC /cache wait noatime nosuid nodev
-
-on boot
-
-    ifup lo
-    hostname localhost
-    domainname localdomain
-
-    class_start default
-
-service ueventd /sbin/ueventd
-    critical
-
-service recovery /sbin/recovery
-
-service adbd /sbin/adbd recovery
-    disabled
-
-on property:persist.service.adb.enable=1
-    start adbd
-
-on property:persist.service.adb.enable=0
-    stop adbd
+# ===========================================================================
+# init.recovery.ardbeg.rc —— ardbeg 的 recovery 专用 init 片段（Android 7.1）
+#
+# 安装位置：/init.recovery.ardbeg.rc
+# 由 bootable/recovery/etc/init.rc 第 1 行
+#       import /init.recovery.${ro.hardware}.rc
+# 导入。本机 ro.hardware=ardbeg —— 见 BoardConfig.mk 里
+#       BOARD_KERNEL_CMDLINE := ... androidboot.hardware=ardbeg
+# 所以文件名必须叫 init.recovery.ardbeg.rc（cm-11 时叫 init.recovery.rc，
+# 名字对不上，7.1 根本不会 import 它，等于这个文件是死的）。
+#
+# ---------------------------------------------------------------------------
+# 【7.1 移植说明：为什么把 cm-11 那版内容全删了】
+#
+# 原文件是从 4.4 原厂 recovery 抄来的，直接搬过来有三个硬伤：
+#
+#   1) 重复定义 service
+#          service ueventd /sbin/ueventd
+#          service recovery /sbin/recovery
+#          service adbd /sbin/adbd recovery
+#      7.1 的 bootable/recovery/etc/init.rc 已经定义了同名 service
+#      （ueventd / recovery / adbd / healthd / vold / setup_adbd）。
+#      init 解析到重名会打 "ignoring duplicate definition" 然后**丢弃后一个**，
+#      而且原来那三条都缺 class，永远不会被 class_start default 拉起。
+#
+#   2) 重复 mount
+#          mount ext4 .../APP /system wait ro remount
+#          mount ext4 .../UDA /data ...
+#          mount ext4 .../CAC /cache ...
+#      7.1 recovery 在 init.rc 的 "on fs" 里用
+#          mount_all /etc/recovery.fstab
+#      统一挂载（fstab 来自 TARGET_RECOVERY_FSTAB = fstab.ardbeg）。
+#      再手工 mount 一次会 EBUSY 失败，在 recovery 日志里刷一堆红字，
+#      还容易掩盖真正的错误。
+#
+#   3) export PATH /sbin、symlink /system/etc /etc、mkdir /data 之类
+#      7.1 的 init 与 mount_all 已经处理，重复做无害但会误导后来人。
+#
+# ---------------------------------------------------------------------------
+# 【当前状态】本文件刻意保持为空（只有注释）。
+#
+#   原因：7.1 的 recovery 通用逻辑（bootable/recovery/etc/init.rc）已经覆盖
+#   了 ardbeg 需要的全部内容，没有必须额外补的设备相关动作。
+#   init 允许一个 rc 文件只有注释，所以保留这个空文件的好处是：
+#     * import 时不会刷 "could not import" 警告；
+#     * 以后要加设备相关动作时有现成的落点。
+#
+# 【以后要加东西时的注意事项】
+#   * 不要重复定义 init.rc 里已有的 service（ueventd / recovery / adbd /
+#     healthd / vold / setup_adbd），重名会被静默丢弃；
+#   * 不要 mount fstab.ardbeg 里已有的挂载点（/system /data /cache /misc
+#     /metadata /recovery /staging /sdcard 等），会 EBUSY；
+#   * 设备相关的一次性动作放 "on fs" 或 "on post-fs-data"。
+#
+#   举个例子：如果想在 recovery 里取内核崩溃日志，**不要**在这里写
+#       mount pstore pstore /sys/fs/pstore
+#   因为 7.1 的 bootable/recovery/etc/init.rc 的 "on fs" 里已经有一模一样
+#   的一句，重复挂载同样会 EBUSY。直接用 `cat /sys/fs/pstore/console-ramoops`
+#   就行（原厂 4.4.4 内核已开 CONFIG_PSTORE_RAM）。
+# ===========================================================================

@@ -1,0 +1,55 @@
+# ============================================================================
+# zz-ardbeg-home-watchdog.rc —— 桌面 / 显示 常驻自愈守护的 init 定义
+#   设备：g100 (ardbeg / Tegra K1 T124 / TN8 P1761)
+#   系统：LineageOS 14.1 (Android 7.1.2)  cm_ardbeg_tv-eng
+#
+# ■ 解决什么问题
+#   TWRP 四清后（以及运行一段时间后）屏幕全黑、桌面不出现。
+#   实测两条独立的失效链：
+#     A) com.cyanogenmod.trebuchet 的 RenderThread SIGABRT
+#        → 进程死亡，但 AMS 里残留 Launcher 的 ActivityRecord，
+#          SF 里只剩僵尸 KeyguardScrim 图层，系统不会自己恢复。
+#     B) /sys/class/backlight/ 为空，LightsService 写不进背光，
+#        DisplayPowerController 卡住不把 display 切到 ON；
+#        只有 settings 的 onBrightnessChanged 能触发重算。
+#   完整日志与推导见 /system/bin/zz-ardbeg-home-watchdog.sh 头部注释。
+#
+# ■ 与 zz-ardbeg-firstboot-fix.rc 的分工
+#   fb_fix        : oneshot，只在首次开机做一轮配置（禁用 SetupWizard、
+#                   标记 device_provisioned、设永不休眠、点亮、拉桌面）。
+#   ardbeg_homewd : 常驻死循环，每 15s 检查桌面进程与 display 状态，
+#                   死了重拉、OFF 重新点亮。两者互补，缺一不可。
+#
+# ■ 放在 /system/etc/init/ 为什么能生效
+#   init 会自动解析该目录下所有 *.rc，开机日志可见
+#       init: (Parsing /system/etc/init/zz-ardbeg-home-watchdog.rc took 0.00s.)
+#   所以本文件不需要重打 boot.img，push 进去下次开机即生效。
+#
+# ■ 文件名为什么以 zz- 开头
+#   init 按目录遍历顺序解析 rc；加 zz- 前缀让它排在其它 rc 之后解析，
+#   并且排在 zz-ardbeg-firstboot-fix.rc 附近，避免开机早期服务定义还没就绪。
+#
+# ■ 【坑，务必注意】服务名不能超过 16 个字符
+#   system/core/init/service.cpp 的 ServiceParser::IsValidName()：
+#       if (name.size() > 16) return false;
+#   7.1 的 init 硬性限制服务名 <= 16 字符（8.0 才放宽）。超长不会报
+#   "Failed to parse"，文件照样打 "Parsing ... took 0.01s."，只有
+#   dmesg 里一行 "invalid service name" 能看出来，logcat 完全看不到。
+#   排查请 `dmesg | grep "invalid service name"`。
+#   之前的 ardbeg_media_watchdog（21 字符）就踩过这个坑，
+#   所以这里用 ardbeg_homewd（13 字符）。
+#   注意服务名和脚本文件名是独立的：service <服务名> <可执行文件路径>。
+#
+# ■ 为什么不是 oneshot
+#   脚本自己 while true 常驻。不加 oneshot 的好处是：万一脚本异常退出，
+#   init 会自动把它重新拉起，守护本身也有兜底。
+# ============================================================================
+
+service ardbeg_homewd /system/bin/sh /system/bin/zz-ardbeg-home-watchdog.sh
+    # 必须是 root：脚本要用 am/input/settings/dumpsys 且要写
+    # /data/local/tmp 下的亮度状态文件，普通 uid 会被拒。
+    class late_start
+    user root
+    group root system
+    # 单实例、常驻循环（脚本自己 while true），所以不是 oneshot。
+    # 不写 disabled，随 late_start 类自动启动。

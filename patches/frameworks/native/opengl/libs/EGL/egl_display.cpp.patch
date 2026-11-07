@@ -1,0 +1,54 @@
+--- a/frameworks/native/opengl/libs/EGL/egl_display.cpp
++++ b/frameworks/native/opengl/libs/EGL/egl_display.cpp
+@@ -111,7 +111,50 @@
+     Loader& loader(Loader::getInstance());
+ 
+     egl_connection_t* const cnx = &gEGLImpl;
+-    if (cnx->dso && disp.dpy == EGL_NO_DISPLAY) {
++    // =====================================================================
++    // 【CM14.1 on ardbeg 移植修复】去掉 disp.dpy 的进程级缓存
++    //
++    // 症状：
++    //   所有 zygote fork 出来的应用进程都在 eglChooseConfig 处崩溃，
++    //       W/libEGL        : eglInitialize(0x1) failed (EGL_BAD_DISPLAY)
++    //       I/OpenGLRenderer: Initialized EGL, version 1.4
++    //       F/OpenGLRenderer: Failed to choose config, error = EGL_BAD_DISPLAY
++    //   而 SurfaceFlinger 和一个手写的 egl 冒烟测试（都是全新 exec 的进程）
++    //   却完全正常。eglInitialize 甚至对外返回 EGL_TRUE，因为
++    //   egl_display_t::initialize() 在驱动初始化失败时只打 ALOGW、不返回 false。
++    //
++    // 根因：
++    //   本机用的是 g100 原厂 Android 4.4.4 的 NVIDIA tegra EGL 驱动
++    //   (/system/lib/egl/libEGL_tegra.so -> /system/vendor/lib/libEGL_tegra_impl.so)。
++    //   它把 display 状态放在**线程局部存储**里（导入符号里能看到
++    //   NvOsTlsGet / NvOsTlsAlloc / NvOsTlsAddTerminator），
++    //   也就是说「哪个线程调过 eglGetDisplay，那个线程才能 eglInitialize」。
++    //
++    //   而这里的 disp.dpy 是 egl_display_t::sDisplay[] 的成员，
++    //   **全进程共享**。第一个线程把驱动返回的句柄缓存进来之后，
++    //   后面所有线程的 eglGetDisplay 都会因为 disp.dpy != EGL_NO_DISPLAY
++    //   被直接跳过，压根不会调到驱动，于是那些线程的 TLS 是空的。
++    //
++    //   4.4.4 时代 hwui 是单线程的（没有 RenderThread），所以老 ROM 不会触发；
++    //   Android 7.1 的 libhwui 引入 RenderThread 之后，
++    //   frameworks/base/libs/hwui/renderthread/EglManager.cpp 在
++    //   RenderThread 上先 eglGetDisplay 再 eglInitialize，
++    //   正好踩中这个缓存 —— 于是所有应用都起不来。
++    //
++    // 修法：
++    //   去掉 disp.dpy == EGL_NO_DISPLAY 这个短路条件，
++    //   让每个线程的 eglGetDisplay 都真实透传给驱动。
++    //   驱动对同一个 EGL_DEFAULT_DISPLAY 始终返回同一个句柄（0x1），
++    //   所以重复调用是幂等且廉价的，disp.dpy 只是被重写成同一个值。
++    //
++    // 验证：
++    //   同一进程内线程 A 只调 eglGetDisplay、线程 B 调 eglInitialize：
++    //     改之前 -> eglChooseConfig 返回 EGL_BAD_DISPLAY（复现应用崩溃）
++    //     改之后 -> 线程 B 自己补一次 eglGetDisplay 后全部成功
++    //   实机刷入后开机动画（bootanimation）能正常由 GPU 渲染出来，
++    //   而在此之前整屏全黑（screencap 出来是纯黑 1920x1080）。
++    // =====================================================================
++    if (cnx->dso) {
+         EGLDisplay dpy = cnx->egl.eglGetDisplay(display);
+         disp.dpy = dpy;
+         if (dpy == EGL_NO_DISPLAY) {

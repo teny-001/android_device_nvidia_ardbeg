@@ -7,7 +7,21 @@ ap.interface=wlan0
 persist.tegra.nvmmlite = 1
 persist.wlan.ti.calibrated = 0
 ro.sf.override_lcd_density = 1
-ro.sf.lcd_density = 320
+# ============================================================================
+# [TV 模式 2026-10-28] ro.sf.lcd_density 从 320 改成 240
+#   屏幕物理分辨率 1920x1200（device.mk: TARGET_SCREEN_WIDTH/HEIGHT）。
+#   320 是这块 8 寸屏的平板原生密度，坐在桌前看没问题；
+#   但 TV 模式的观看距离通常 2 米以上，320 下的字和控件都太小。
+#   240 让 UI 整体放大约 33%，是 1920 宽下比较稳妥的一档
+#   （再往下 160 会让部分应用的多列布局退化成单列，Trebuchet 图标也会过大）。
+#
+#   想回平板模式就把 240 改回 320，改完 make installclean 重编即可，
+#   不需要动别的文件。
+#
+#   注意：density 变了以后，已装的第三方应用可能缓存了旧的资源选择结果，
+#   刷完建议 wipe data（eng 版本第一次刷机本来就该 wipe）。
+# ============================================================================
+ro.sf.lcd_density = 240
 
 # NFC
 debug.nfc.fw_download=false
@@ -39,7 +53,15 @@ pbc.gpu.cap.af=/sys/devices/platform/host1x/gk20a.0/devfreq/gk20a.0/available_fr
 persist.tegra.didim.enable = 1
 persist.tegra.didim.video = 5
 persist.tegra.didim.normal = 3
-persist.sys.usb.config=mtp
+# ============================================================================
+# [修复 2026-10-28] 这里原来是 persist.sys.usb.config=mtp，会把 adb 关掉。
+#   原因：system.prop 的内容是「追加」到 build.prop 末尾的，属性加载时
+#   后写的覆盖先写的，所以这一行会盖掉 device.mk 里
+#       PRODUCT_PROPERTY_OVERRIDES += persist.sys.usb.config=mtp,adb
+#   结果就是插上 USB 只有 MTP，adbd 根本不起 —— 刷了包也连不上 adb。
+#   改成 mtp,adb，和 device.mk 保持一致。
+# ============================================================================
+persist.sys.usb.config=mtp,adb
 persist.sys.isUsbOtgEnabled=1
 
 ro.hardware.sensors=default.api_v1.3.mpl520.nvs
@@ -78,9 +100,104 @@ ro.zygote.usap_supported=false
 # otaupdate
 ro.radio.noril=true
 
-ro.build.characteristics=tablet
+# [修改 2026-10-28] 注释掉 ro.build.characteristics=tablet（TV 模式改造）
+# 本文件是 TARGET_SYSTEM_PROP，内容被逐字追加到 build.prop，所以这里原本会让
+# build.prop 同时出现 "tv"（buildinfo.sh 从 PRODUCT_CHARACTERISTICS 生成，在前）
+# 和 "tablet"（这一行，在后）两行互相矛盾的声明。init 对 ro.* 只允许设置一次，
+# 实际生效的是先出现的 tv，功能上没问题，但语义脆弱且容易误读。
+# 现在只保留 lineage.mk 里的 PRODUCT_CHARACTERISTICS := tv 这一个来源。
+# 详细分析见 ardbeg-work/编译与验证指南.md 的「TV 模式」一节。
+#ro.build.characteristics=tablet
 persist.sys.language=zh
 persist.sys.country=CN
 persist.sys.timezone=Asia/Shanghai
 ro.product.locale.language=zh
 ro.product.locale.region=CN
+
+# ============================================================================
+# 【2026-11-06 巡检新增】放大 logd 环形缓冲区 256K -> 16M
+# ============================================================================
+#   原因：原厂 4.4.4 的 hwcomposer.tegra.so 里有个 propmonitor_thread，
+#   会以约 11.5 条/秒 的速度刷这条 Info 日志：
+#       hwcomposer: propmonitor_thread: process event IN_CLOSE_NOWRITE
+#                   overscan_rate:0 overscan_cur=0; overscanvalue:0, isoverscan:0
+#   实测 2 秒 23 条、约 100 万条/天。
+#
+#   默认 256KB 的 main 缓冲区在这种刷屏下只能存 1 分钟不到的历史，
+#   做任何排查时 `logcat -d` 都只能看到 hwcomposer，别的全被冲掉了
+#   （本次巡检一开始就是这样，抓不到 media.extractor 的死亡现场）。
+#
+#   16M 之后同样刷屏也能留几个小时的历史。
+#   /cache/persist_log.txt 那条落盘链路不受影响（它自己带 4x4MB 轮转）。
+#
+#   注意：这个线程是闭源 HWC 里的，日志没法关，只能靠放大缓冲区对冲。
+#   彻底解决要等 HWC shim 做完（见 patches/README.md 的 HWC 章节），
+#   或者把 HWC 完全绕开（当前用 disableHWC=1 走 GLES 合成，
+#   但 SF 仍然会加载 hwc 模块，所以线程照跑）。
+ro.logd.size=16M
+
+# ============================================================================
+# 【2026-11-06 新增】关掉 ART 的 CheckJNI
+# ============================================================================
+#   这一条是原厂百度输入法（com.baidu.input_baidutv）能在 7.1 上跑起来的
+#   必要条件，不是可选项。删掉它，中文输入法就废了。
+#
+#   【为什么 eng 版默认是开的】
+#   build/core/main.mk:383 对 eng variant 自动注入：
+#       ADDITIONAL_BUILD_PROPERTIES += ro.kernel.android.checkjni=1
+#   所以 /system/build.prop 里天生就有 ro.kernel.android.checkjni=1。
+#   这个属性是 ro. 前缀，运行时改不了，只能靠下面这行覆盖。
+#
+#   【覆盖原理】art/runtime/AndroidRuntime.cpp:637-653
+#       bool checkJni = false;
+#       property_get("dalvik.vm.checkjni", propBuf, "");
+#       if (strcmp(propBuf, "true") == 0) {
+#           checkJni = true;
+#       } else if (strcmp(propBuf, "false") != 0) {
+#           // 只有"既不是 true 也不是 false"才回落到内核参数
+#           property_get("ro.kernel.android.checkjni", propBuf, "");
+#           if (propBuf[0] == '1') checkJni = true;
+#       }
+#   也就是说 dalvik.vm.checkjni 显式设成 false 时，那个 else if 分支
+#   直接跳过，ro.kernel.android.checkjni=1 不再起作用。
+#
+#   【到底救了什么】
+#   百度输入法是加固包。它的 libchiperencoder_v1_2.so 在 JNI_OnLoad 里
+#   RegisterNatives 了一张表，表里有个 nativeChiperGetVersion()I，
+#   但 APK 的 classes.dex 里 Lcom/baidu/util/ChiperEncrypt; 根本没这个方法
+#   （只有名字相近的 nativeB64GetVersion；在 dex 里搜
+#    "nativeChiperGetVersion" 出现 0 次）。
+#   Dalvik 对这种情况是静默跳过的，所以 4.4.4 上一直正常；
+#   ART 不会 —— art/runtime/jni_internal.cc:2313-2321 无条件抛
+#   NoSuchMethodError 并 return JNI_ERR，留下 pending exception。
+#
+#   接着 art/runtime/java_vm_ext.cc:867-880，JNI_OnLoad 返回后 ART
+#   只检查返回值、不检查 pending exception，库算"加载成功"；
+#   但库自己在 JNI_OnLoad 里还会调 NewGlobalRef，CheckJNI 见到
+#   "带 pending exception 调 JNI" 直接 JniAbort -> LOG(FATAL)：
+#       F art: JNI DETECTED ERROR IN APPLICATION:
+#              JNI NewGlobalRef called with pending exception
+#              java.lang.NoSuchMethodError: ... nativeChiperGetVersion()I
+#   进程 SIGABRT，AM 每秒重启 ImeService，键盘永远弹不出来。
+#
+#   关掉 CheckJNI 后，那个 pending exception 只是留在原地，
+#   加固壳入口 com.baidu.input.pub.h.s(Context) -> h.kn() 有 try/catch，
+#   异常被吞掉，ImeService.onCreate 继续往下走（实测日志里紧接着就是
+#   com.baidu.input.ime.ag.init / p.<init>），键盘正常弹出、
+#   拼音候选正常、候选能上屏。实测 "has died" 计数为 0。
+#
+#   【副作用与取舍】
+#   1. 好处：这台机器跑的是 2014 年的 4.4 生态，很多老应用的 JNI 都不干净
+#      （老 Dalvik 太宽容），关掉 CheckJNI 对整机兼容性普遍有利。
+#   2. 代价：native 层的 JNI 误用不再立刻 abort，排查 native 崩溃时
+#      少了一个"直接指认凶手"的信号。需要时临时开回来：
+#          adb shell setprop dalvik.vm.checkjni true && adb reboot
+#      （必须在 zygote 起来之前设，因为 VM 只读一次）
+#   3. 不影响 dex 校验、不影响 SELinux、不影响 APK 签名。
+#
+#   注意：这一行必须放在 system.prop 里（会被并进 /system/build.prop），
+#   不能写进 BoardConfig 的 ADDITIONAL_DEFAULT_PROPERTIES，
+#   因为 ro.kernel.android.checkjni 就在 /system/build.prop 里，
+#   同文件内靠后出现的 dalvik.vm.checkjni 才能确保生效顺序清晰。
+dalvik.vm.checkjni=false
+

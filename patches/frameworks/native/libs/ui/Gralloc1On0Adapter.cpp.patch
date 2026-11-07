@@ -1,0 +1,100 @@
+--- a/frameworks/native/libs/ui/Gralloc1On0Adapter.cpp
++++ b/frameworks/native/libs/ui/Gralloc1On0Adapter.cpp
+@@ -396,7 +396,47 @@
+             return GRALLOC1_ERROR_UNSUPPORTED;
+         }
+     } else {
+-        acquireFence->waitForever("Gralloc1On0Adapter::lock");
++        // =================================================================
++        // 【CM14.1 on ardbeg 移植修复】跳过 acquire fence 的无限等待
++        //
++        // 症状：插着 USB 鼠标时，system_server 的 android.display 线程永久
++        //   卡死在下面的 waitForever 里，2 分半后被 Watchdog 判死，之后
++        //   DeadSystemException 无限崩溃循环：
++        //       W Watchdog: Blocked in handler on display thread
++        //   栈（/data/anr/traces_SystemServer_WDT*.txt）：
++        //       sync_wait
++        //       Fence::waitForever
++        //       Gralloc1On0Adapter::lock            <- 这里
++        //       Gralloc::Device::lock
++        //       GraphicBufferMapper::lockAsync
++        //       GraphicBuffer::lockAsync
++        //       Surface::lock
++        //       SpriteController::doUpdateSprites   <- 画鼠标指针
++        //
++        // 根因：本机 HWC 是原厂 Android 4.4.4 编的 hwcomposer.tegra.so，
++        //   跑在 7.1 的 SurfaceFlinger 里，hwc_layer_1_t 布局错位
++        //   （详见 device/nvidia/ardbeg/patches/README.md 的 HWC 专章），
++        //   导致 SF 交给 client layer 的 release fence 永远不会被 signal。
++        //
++        //   普通 App 渲染不受影响 —— 生产者侧
++        //   BufferQueueProducer::dequeueBuffer 判断 buffer 可用靠 slot 状态
++        //   + waitForFreeSlotThenRelock，并不等 acquire fence；GPU 侧靠
++        //   EGL 隐式同步。全系统里唯一显式"等 acquire fence 再 CPU 写内存"
++        //   的路径就是 Surface::lock() -> GraphicBuffer::lockAsync()，
++        //   而 7.1 里走这条路的主要就是 SpriteController（鼠标指针）。
++        //
++        // 为什么跳过等待是安全的：
++        //   SpriteController 每帧都用 SkXfermode::kSrc_Mode 把整个 buffer
++        //   重画一遍（图标 + 透明填充剩余区域，见 SpriteController.cpp
++        //   218-231 行），不存在"基于旧内容增量修改"的情况。所以即使
++        //   buffer 还在被扫描输出，写进去的内容也是完整正确的，最多出现
++        //   一帧撕裂 —— 对一个 33x42 的鼠标箭头完全不可感知。
++        //
++        // 注：这里的返回值本来就被丢弃（没有赋给任何变量），
++        //   所以注释掉不影响任何逻辑；二进制侧对应
++        //   patches/tools/patch_libui_gralloc.py（把 blx 换成 nop; nop）。
++        // =================================================================
++        // acquireFence->waitForever("Gralloc1On0Adapter::lock");
+         int result = mModule->lock(mModule, buffer->getHandle(),
+                 static_cast<int32_t>(producerUsage | consumerUsage),
+                 accessRegion.left, accessRegion.top, accessRegion.width,
+@@ -437,7 +477,47 @@
+             return GRALLOC1_ERROR_UNSUPPORTED;
+         }
+     } else if (mModule->lock_ycbcr) {
+-        acquireFence->waitForever("Gralloc1On0Adapter::lockYCbCr");
++        // =================================================================
++        // 【CM14.1 on ardbeg 移植修复】跳过 acquire fence 的无限等待
++        //
++        // 症状：插着 USB 鼠标时，system_server 的 android.display 线程永久
++        //   卡死在下面的 waitForever 里，2 分半后被 Watchdog 判死，之后
++        //   DeadSystemException 无限崩溃循环：
++        //       W Watchdog: Blocked in handler on display thread
++        //   栈（/data/anr/traces_SystemServer_WDT*.txt）：
++        //       sync_wait
++        //       Fence::waitForever
++        //       Gralloc1On0Adapter::lock            <- 这里
++        //       Gralloc::Device::lock
++        //       GraphicBufferMapper::lockAsync
++        //       GraphicBuffer::lockAsync
++        //       Surface::lock
++        //       SpriteController::doUpdateSprites   <- 画鼠标指针
++        //
++        // 根因：本机 HWC 是原厂 Android 4.4.4 编的 hwcomposer.tegra.so，
++        //   跑在 7.1 的 SurfaceFlinger 里，hwc_layer_1_t 布局错位
++        //   （详见 device/nvidia/ardbeg/patches/README.md 的 HWC 专章），
++        //   导致 SF 交给 client layer 的 release fence 永远不会被 signal。
++        //
++        //   普通 App 渲染不受影响 —— 生产者侧
++        //   BufferQueueProducer::dequeueBuffer 判断 buffer 可用靠 slot 状态
++        //   + waitForFreeSlotThenRelock，并不等 acquire fence；GPU 侧靠
++        //   EGL 隐式同步。全系统里唯一显式"等 acquire fence 再 CPU 写内存"
++        //   的路径就是 Surface::lock() -> GraphicBuffer::lockAsync()，
++        //   而 7.1 里走这条路的主要就是 SpriteController（鼠标指针）。
++        //
++        // 为什么跳过等待是安全的：
++        //   SpriteController 每帧都用 SkXfermode::kSrc_Mode 把整个 buffer
++        //   重画一遍（图标 + 透明填充剩余区域，见 SpriteController.cpp
++        //   218-231 行），不存在"基于旧内容增量修改"的情况。所以即使
++        //   buffer 还在被扫描输出，写进去的内容也是完整正确的，最多出现
++        //   一帧撕裂 —— 对一个 33x42 的鼠标箭头完全不可感知。
++        //
++        // 注：这里的返回值本来就被丢弃（没有赋给任何变量），
++        //   所以注释掉不影响任何逻辑；二进制侧对应
++        //   patches/tools/patch_libui_gralloc.py（把 blx 换成 nop; nop）。
++        // =================================================================
++        // acquireFence->waitForever("Gralloc1On0Adapter::lockYCbCr");
+         int result = mModule->lock_ycbcr(mModule, buffer->getHandle(),
+                 static_cast<int>(producerUsage | consumerUsage),
+                 accessRegion.left, accessRegion.top, accessRegion.width,

@@ -8,12 +8,34 @@
 
 on boot
 
-# TLK storage service
-service tlk_daemon /vendor/bin/tlk_daemon --storagedir /data
-    class main
-    user system
-    group keystore
-    oneshot
+# 【修复 2026-11-04】注释掉 tlk_daemon 服务定义。
+#
+# 原来的定义：
+#     service tlk_daemon /vendor/bin/tlk_daemon --storagedir /data
+#         class main
+#         user system
+#         group keystore
+#         oneshot
+#
+# 问题：这套 ROM 里 /vendor/bin/tlk_daemon **根本不存在**（已在真机上确认）：
+#     # ls -l /vendor/bin/tlk_daemon
+#     /vendor/bin/tlk_daemon: No such file or directory
+#   vendor/nvidia/ardbeg/ardbeg-vendor-blobs.mk 里只在注释中提过这个文件，
+#   实际的 PRODUCT_COPY_FILES 里并没有它（原厂包该文件受 TLK 签名保护，
+#   无法直接搬运）。于是 init 每次开机都报：
+#     init: cannot find '/vendor/bin/tlk_daemon', disabling 'tlk_daemon'
+#   然后把它标记成 disabled，服务本身永远不会跑，这条定义只是噪音。
+#
+#   TLK（Trusty Little Kernel）负责安全世界里的密钥存储，缺失它只影响
+#   依赖 TEE 的功能（如硬件级 DRM keybox、部分 Widevine 等级），
+#   不影响开机和音频。等以后能拿到合法的 tlk_daemon + 签名 TOS 镜像时，
+#   把下面这几行放开即可。
+#
+# service tlk_daemon /vendor/bin/tlk_daemon --storagedir /data
+#     class main
+#     user system
+#     group keystore
+#     oneshot
 
 on post-fs-data
     mkdir /data/tlk 0700 system keystore

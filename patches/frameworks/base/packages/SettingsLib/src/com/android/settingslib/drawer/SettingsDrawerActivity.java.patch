@@ -1,0 +1,55 @@
+--- a/frameworks/base/packages/SettingsLib/src/com/android/settingslib/drawer/SettingsDrawerActivity.java
++++ b/frameworks/base/packages/SettingsLib/src/com/android/settingslib/drawer/SettingsDrawerActivity.java
+@@ -93,6 +93,39 @@
+         }
+         super.setContentView(R.layout.settings_with_drawer);
+         mContentHeaderContainer = (FrameLayout) findViewById(R.id.content_header_container);
++
++        // ====================================================================
++        // 【ardbeg 修复 2026-11-06】把 mUserManager 初始化提前到所有 return 之前
++        // ====================================================================
++        //   原始代码把 mUserManager = UserManager.get(this) 放在本方法**最后**
++        //   （原第 119 行，紧跟着 mDrawerAdapter 那段）。但这个方法里有两条
++        //   提前 return 的路径：
++        //
++        //     (A) 第 97 行附近：if (mDrawerLayout == null) return;
++        //     (B) 第 101 行附近：if (theme.getBoolean(
++        //             android.R.styleable.Theme_windowNoTitle, false)) {
++        //             ... mDrawerLayout = null; return; }
++        //
++        //   走 (A) 或 (B) 都会跳过 mUserManager 的赋值，之后任何用到它的地方
++        //   都是 NPE。7.1 的 TV 形态（本机 PRODUCT_CHARACTERISTICS := tv，
++        //   Settings 用的是 Theme.DeviceDefault.NoActionBar 这类
++        //   windowNoTitle=true 的主题）**必然走 (B)**。
++        //
++        //   实测现场（g100 / ardbeg / cm_ardbeg_tv-eng）：
++        //     Settings 主列表能正常显示，但**点任意一个条目立刻崩**：
++        //       E AndroidRuntime: FATAL EXCEPTION: main
++        //       E AndroidRuntime: java.lang.NullPointerException: Attempt to
++        //           invoke virtual method 'android.content.pm.UserInfo
++        //           android.os.UserManager.getUserInfo(int)'
++        //           on a null object reference
++        //     崩溃点在 onTileClicked() -> openTile() -> mUserManager.getUserInfo()。
++        //
++        //   修法：把赋值提到 super.setContentView() 之后、第一个 return 之前。
++        //   UserManager.get(this) 只依赖 Context，此时完全可用，
++        //   提前初始化没有副作用（原来放在后面也没有依赖前面的成员）。
++        // ====================================================================
++        mUserManager = UserManager.get(this);
++
+         mDrawerLayout = (DrawerLayout) findViewById(R.id.drawer_layout);
+         if (mDrawerLayout == null) {
+             return;
+@@ -116,7 +149,11 @@
+             }
+         });
+ 
+-        mUserManager = UserManager.get(this);
++        // 【ardbeg 修复 2026-11-06】原 mUserManager = UserManager.get(this);
++        // 已上移到本方法开头（super.setContentView() 之后、所有 return 之前），
++        // 否则 TV 主题走提前 return 的分支时会漏掉初始化并导致 NPE。
++        // 详见上面那段注释。
++
+         if (DEBUG_TIMING) Log.d(TAG, "onCreate took " + (System.currentTimeMillis() - startTime)
+                 + " ms");
+     }

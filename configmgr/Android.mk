@@ -25,9 +25,14 @@ LOCAL_MODULE_TAGS := optional
 
 LOCAL_CFLAGS += -Werror -Wno-error=unused-parameter -Wno-unused-parameter
 
+# ============================================================================
+# [修复 2026-10-28] 同 audio/Android.mk：external/tinyhal 在 cm-11.0 里不存在，
+#   改用设备树自带的 device/nvidia/ardbeg/include/tinyhal/audio_config.h。
+#   audio_config.c 里只 include 了 <tinyhal/audio_config.h>，没有别的外部依赖。
+# ============================================================================
 LOCAL_C_INCLUDES += \
 	external/tinycompress/include \
-	external/tinyhal/include \
+	device/nvidia/ardbeg/include \
 	device/nvidia/ardbeg/tinyalsa/include \
 	external/expat/lib \
 	$(call include-path-for, audio-utils)

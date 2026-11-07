@@ -1,0 +1,48 @@
+--- a/libnativehelper/JNIHelp.cpp
++++ b/libnativehelper/JNIHelp.cpp
+@@ -26,6 +26,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <assert.h>
++// [新增 2026-10-28] intptr_t 用在下面对 strerror_r 返回值的比较里，
++// 见 jniStrError() 里的说明。
++#include <stdint.h>
+ 
+ #include <string>
+ 
+@@ -294,10 +297,33 @@
+     // Note: glibc has a nonstandard strerror_r that returns char* rather than POSIX's int.
+     // char *strerror_r(int errnum, char *buf, size_t n);
+     char* ret = (char*) strerror_r(errnum, buf, buflen);
+-    if (((int)ret) == 0) {
++    // ========================================================================
++    // [修改 2026-10-28] (int)ret 改成 (intptr_t)ret，修复宿主 64 位编译错误：
++    //
++    //     libnativehelper/JNIHelp.cpp:297:15: error:
++    //         cast from 'char*' to 'int' loses precision [-fpermissive]
++    //     libnativehelper/JNIHelp.cpp:300:22: error:
++    //         cast from 'char*' to 'int' loses precision [-fpermissive]
++    //
++    // 这段代码的本意是用 strerror_r 的返回值区分两种实现：
++    //   POSIX 版返回 int      -> 0 表示成功，-1 表示失败
++    //   glibc GNU 版返回 char* -> 成功时返回字符串指针
++    // 作者把返回值强转成 int 来统一比较，在 32 位宿主上指针和 int 同宽，
++    // 恰好能工作；换成 64 位宿主后指针是 8 字节，强转 int 会截断，
++    // 编译器直接报精度丢失。
++    //
++    // 用 intptr_t（与指针同宽的整型）比较，语义和原来**完全一致**：
++    //   GNU 成功   -> ret 是有效指针，既不为 0 也不为 -1，落到最后的
++    //                 else 分支 return ret，正确；
++    //   POSIX 成功 -> 0，返回 buf；
++    //   POSIX 失败 -> -1，把错误码格式化进 buf 再返回。
++    // 只是不再截断，64 位上也成立。
++    // ========================================================================
++    intptr_t retv = (intptr_t) ret;
++    if (retv == 0) {
+         // POSIX strerror_r, success
+         return buf;
+-    } else if (((int)ret) == -1) {
++    } else if (retv == -1) {
+         // POSIX strerror_r, failure
+         // (Strictly, POSIX only guarantees a value other than 0. The safest
+         // way to implement this function is to use C++ and overload on the

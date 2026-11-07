@@ -1,0 +1,32 @@
+--- a/packages/apps/CMParts/Android.mk
++++ b/packages/apps/CMParts/Android.mk
+@@ -15,14 +15,29 @@
+     uicommon \
+     org.cyanogenmod.platform.internal
+ 
++# [ardbeg] 把 uicommon 的资源目录并进来，并让它单独生成一套 R
++#
++# 原因：LOCAL_STATIC_JAVA_LIBRARIES 里的 uicommon（external/uicommon）自己带了
++# LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/res，但它是 BUILD_STATIC_JAVA_LIBRARY，
++# AOSP 不会给静态 java 库单独生成 R.java —— R 必须由**消费方**在 aapt 链接时
++# 用 --extra-packages 指定包名一并生成。CMParts 原来只列了 support 库的包，
++# 没有 com.cyngn.uicommon，于是 external/uicommon 里
++#   com.cyngn.uicommon.view.ExpandingCard 引用的 com.cyngn.uicommon.R$id
++# 根本不存在。ProGuard 5.1 会因此报
++#   Warning: com.cyngn.uicommon.view.ExpandingCard:
++#       can't find referenced class com.cyngn.uicommon.R$id
++#   Error: Please correct the above warnings first.
++# 而即使绕过 ProGuard，运行时 ExpandingCard 也会 NoClassDefFoundError。
+ LOCAL_RESOURCE_DIR := \
+     $(LOCAL_PATH)/res \
++    external/uicommon/res \
+     frameworks/support/v7/preference/res \
+     frameworks/support/v14/preference/res \
+     frameworks/support/v7/appcompat/res \
+     frameworks/support/v7/recyclerview/res
+ 
+ LOCAL_AAPT_FLAGS := --auto-add-overlay \
++    --extra-packages com.cyngn.uicommon \
+     --extra-packages android.support.v7.preference:android.support.v14.preference:android.support.v17.preference:android.support.v7.appcompat:android.support.v7.recyclerview
+ 
+ LOCAL_CERTIFICATE := platform

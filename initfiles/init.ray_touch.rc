@@ -28,8 +28,25 @@ on init
     chown system system /sys/devices/virtual/misc/touch/slowscan_enable
 
 # Raydium touch setting
-service rm_ts_service /system/bin/rm_ts_server
-    class main
-    user system
-    group system input
-    disabled
+# ----------------------------------------------------------------------------
+# [修复 2026-10-28] 下面这段 service 定义注释掉了，因为 init.tegra.rc 第 379 行
+#   已经定义了一个同名的 rm_ts_service，init 会报重复定义并**丢弃后一个**：
+#       <3>init: ignoring duplicate service definition 'rm_ts_service'
+#
+#   两处的差别只有 class：
+#       init.ray_touch.rc : class main
+#       init.tegra.rc     : class late_start
+#   而 init 的执行顺序是 init.ardbeg.rc 正文 -> 它的 import 列表
+#   （cal / tegra / tegra_emmc / t124 / ray_touch），所以 init.tegra.rc
+#   里那份**先注册**、真正生效的是 late_start 那份。
+#   也就是说这行重复定义一直存在，只是被打了一条 error 然后忽略，
+#   实际行为没有变过。为了不改变现有行为（touch 目前是好的），
+#   这里保留 init.tegra.rc 那份，把这份注释掉，只清掉这条开机 error。
+#
+#   以后如果要改 class，改 init.tegra.rc 那一处。
+# ----------------------------------------------------------------------------
+#service rm_ts_service /system/bin/rm_ts_server
+#    class main
+#    user system
+#    group system input
+#    disabled

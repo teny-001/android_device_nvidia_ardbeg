@@ -1,0 +1,61 @@
+--- a/vendor/cm/vendorsetup.sh
++++ b/vendor/cm/vendorsetup.sh
+@@ -1,4 +1,57 @@
+-for combo in $(curl -s https://raw.githubusercontent.com/LineageOS/hudson/master/cm-build-targets | sed -e 's/#.*$//' | grep cm-11.0 | awk {'print $1'})
++# [修改 2026-10-28] 原始内容只有三行，无条件去 GitHub 拉官方设备列表：
++#
++#     for combo in $(curl -s https://raw.githubusercontent.com/LineageOS/hudson/master/cm-build-targets | sed -e 's/#.*$//' | grep cm-11.0 | awk {'print $1'})
++#     do
++#         add_lunch_combo $combo
++#     done
++#
++# 三个问题，前两个是致命的：
++#
++#   1. curl 没有 --connect-timeout / --max-time。本机访问
++#      raw.githubusercontent.com 经常连不上又不报错（SYN 被丢弃），
++#      curl 就会一直挂着。而这个文件是被 build/envsetup.sh:2179 在
++#      source 阶段无条件执行的，于是 `source build/envsetup.sh` 直接卡死，
++#      编译脚本连 make 都进不去。
++#       —— 现象：编译脚本打印完表头就不动了，
++#          logs/rom_build_*.log 这个文件**一直不生成**（tee 还没启动）。
++#          用 ps 看会发现卡在 `curl -s https://raw.githubusercontent.com/...`。
++#
++#   2. 这段代码加的是**官方 CM 设备**的 lunch 组合（cm_ardbeg 不在里面，
++#      我们用的是 device/nvidia/ardbeg 自己 add_lunch_combo 的）。
++#      对本地非官方设备来说这份列表完全没用，纯粹是白等网络。
++#
++#   3. 每次 source envsetup.sh 都重新下载，没有缓存。
++#
++# 修法：
++#   - 加 --connect-timeout / --max-time，网络不通最多等 25 秒就放弃；
++#   - 结果缓存到 $TMPDIR/cm-build-targets.cache，24 小时内不再联网；
++#   - 加 CM_SKIP_TARGETS_FETCH=1 环境变量可以彻底跳过（离线/被墙时用）；
++#   - 任何一步失败都退化成空列表，绝不阻塞后续构建。
++#
++# 注意：这里刻意不追求出错即返回，因为本文件是被 source 的，
++# 任何非零返回都可能把调用方的 shell 搞乱，所以统一用 `|| true` 收口。
++
++CM_TARGETS_URL="https://raw.githubusercontent.com/LineageOS/hudson/master/cm-build-targets"
++CM_TARGETS_CACHE="${TMPDIR:-/tmp}/cm-build-targets.cache"
++_cm_targets=""
++
++if [ -n "$CM_SKIP_TARGETS_FETCH" ]; then
++    # 显式要求跳过：连缓存都不读，直接空列表
++    _cm_targets=""
++elif [ -s "$CM_TARGETS_CACHE" ] && [ -z "$(find "$CM_TARGETS_CACHE" -mmin +1440 2>/dev/null)" ]; then
++    # 缓存新鲜（24 分钟内），直接用，不联网
++    _cm_targets=$(cat "$CM_TARGETS_CACHE" 2>/dev/null) || _cm_targets=""
++else
++    _cm_targets=$(curl -s --connect-timeout 5 --max-time 20 "$CM_TARGETS_URL" 2>/dev/null) || _cm_targets=""
++    # 只有真拿到内容才写缓存，避免把空结果/错误页缓存下来
++    if [ -n "$_cm_targets" ]; then
++        printf '%s\n' "$_cm_targets" > "$CM_TARGETS_CACHE" 2>/dev/null || true
++    fi
++fi
++
++for combo in $(printf '%s\n' "$_cm_targets" | sed -e 's/#.*$//' | grep cm-11.0 | awk '{print $1}')
+ do
+     add_lunch_combo $combo
+ done
++
++unset _cm_targets

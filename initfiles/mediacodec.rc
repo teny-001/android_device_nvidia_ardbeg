@@ -1,0 +1,86 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 修改 2026-11-06] mediacodec 服务定义
+#
+# 相对 AOSP 7.1 原版（frameworks/av/media/libstagefright/mediacodec.rc）
+# 只多了一行：
+#
+#     seclabel u:r:mediaserver:s0
+#
+# 【为什么要加】
+#
+# 原版没有 seclabel，init 会在 Service::Start() 里自己算
+# （system/core/init/service.cpp:346-390）：
+#
+#     getcon(&mycon);
+#     getfilecon(args_[0].c_str(), &fcon);
+#     rc = security_compute_create(mycon, fcon,
+#                                  string_to_security_class("process"), &ret_scon);
+#     if (rc < 0) {
+#         ERROR("could not get context while starting '%s'\n", name_.c_str());
+#         return false;                      // ← 服务压根不启动
+#     }
+#
+# security_compute_create() 要拿「源域 × 目标文件 context × process class」
+# 去策略里查 transition 规则。本机是原厂 4.4.4 的 /sepolicy，只有 307 个 type，
+# 里面**没有 mediacodec 这个域**（4.4.4 时代编解码全在 mediaserver 里，
+# mediacodec 是 5.0 才拆出来的独立进程）。查不到 transition 规则，
+# security_compute_create() 返回 -1，于是：
+#
+#     dmesg: init: could not get context while starting 'mediacodec'   ← 每 15 秒一条
+#
+# 服务**一次都没启动过**，MediaCodec 的 OMX 服务端不存在，
+# 所有硬解码/软解码请求都会失败。
+#
+# 修法：直接写死 seclabel，让 init 走上面那个 `if (!seclabel_.empty())`
+# 分支跳过自动算域。借用的 mediaserver 域在原厂 4.4.4 策略里是存在的
+# （实测 /system/bin/mediaserver 正常起且 dmesg 无 deny），
+# 而且 mediacodec 本来就需要 media 那一套权限（读 /dev/mtk*、访问 gralloc）。
+#
+# 【长期正解】
+# 换自编内核（支持 policydb 30）+ 7.1 完整 sepolicy 后，
+# mediacodec 域自然存在，这一行可以删掉。
+# 另一个方向是 patch system/core/init/service.cpp，
+# 让 security_compute_create() 失败时降级成「不切域继续启动」而不是
+# return false，那样连这一行都不用加（但那个补丁影响面更大，需要评估）。
+# =============================================================================
+
+service mediacodec /system/bin/mediacodec
+    class main
+    user mediacodec
+    group camera drmrpc mediadrm audio media
+    ioprio rt 4
+    writepid /dev/cpuset/foreground/tasks
+    seclabel u:r:mediaserver:s0
+
+# =============================================================================
+# [CM14.1-on-ardbeg 修改 2026-11-07] 硬件解码：补 media 组
+#
+# 【症状】
+#   播放 H.264 时 ACodec 选中 OMX.Nvidia.h264.decode 后立刻报
+#     NvxVideoDecoderAcquireResources : NvxNvMMTransformOpen failed
+#     ACodec [OMX.Nvidia.h264.decode] ERROR(0x80001000)  (InsufficientResources)
+#   冷启动组件枚举阶段还有
+#     TVMR: NvMMDecTVMRCreateParser: - Could not get AVP handle
+#
+# 【根因】
+#   7.1 把编解码从 mediaserver(uid 1013 = AID_MEDIA) 拆成独立的
+#   mediacodec 进程(uid 1046)。原厂 4.4.4 的 ueventd 规则把
+#     /dev/tegra_avpchannel、/dev/tegra_audio_avpchannel
+#   设成 media:media 0660。mediacodec 的 primary gid 是 camera(1006)，
+#   supplementary groups 只有 1005/1026/1031，没有 media(1013)，
+#   因此 libnvavp.so 的 NvAvpOpen() 打不开 AVP 通道。
+#   内核侧 nvavp 固件(nvavp_os_8ff00000.bin / nvavp_vid_ucode_alt.bin)
+#   是加载成功的，纯粹是用户态权限问题。
+#
+#   AVP handle 在首次 open 失败后被 NvMM 缓存在进程内，
+#   所以事后 chmod 666 节点对「已经启动的进程」完全无效；
+#   实测先 chmod 再 kill mediacodec 让 init 重拉，fd 里立刻出现
+#   /dev/tegra_avpchannel x2，播放顺利跑到 EOS detected。
+#
+# 【修复】
+#   把 media 加入服务 supplementary groups，让进程一启动就具备
+#   访问 AVP 通道的权限。不改 user(1046)、不改 primary gid，
+#   也不放大任何设备节点权限，是最小且语义正确的改动。
+#   4.4 blob 并不检查 getuid()==AID_MEDIA（chmod 666 时 uid 仍是 1046
+#   也能解码成功），只需能 open 成功即可。
+# =============================================================================

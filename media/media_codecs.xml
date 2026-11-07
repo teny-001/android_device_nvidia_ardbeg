@@ -14,6 +14,39 @@
      limitations under the License.
 -->
 
+<!-- =====================================================================
+     [CM14.1-on-ardbeg 修改 2026-11-07] 硬件解码专项：7.1 XML 语法兼容
+     =================================================================
+     【症状】
+       4.4.4 原版里 OMX.Nvidia.mp3.decoder / OMX.Nvidia.bypass.decoder
+       用同一个 name 重复声明多次（每次一个 type 属性）。Android 7.1 的
+       MediaCodecList::addMediaCodecFromAttributes() 在
+       frameworks/av/media/libstagefright/MediaCodecList.cpp:737 有：
+
+           if (mUpdate != (index >= 0)) return -EINVAL;
+
+       第二次遇到同名组件时 mUpdate=false 而 index>=0，直接返回 -EINVAL，
+       parseTopLevelXMLFile() 随后执行 mCodecInfos.clear()。
+       结果整张 codec 表被清空，ACodec::findMatchingCodecs() 拿到空列表，
+       打印 "Unable to instantiate a decoder for type 'video/avc'
+       with err 0xfffffffe" (NAME_NOT_FOUND)，连软解都起不来。
+
+     【修复】
+       把「同名组件 + 多个 type」改写成 7.1 支持的
+       <MediaCodec name="..."><Type .../><Type .../></MediaCodec> 形式。
+       组件名唯一，语义不变。
+
+     【实测】
+       冷启动后 OMXMaster::makeComponentInstance 从 6 条增加到 63 条，
+       ACodec 能选中 OMX.Nvidia.h264.decode；配合下面三项修复后，
+       720p H.264 播放跑到 "TVMR: ... EOS detected" 且无 0x80001000。
+
+     【配套，缺一不可】
+       1) system/lib/libstagefrighthw.so  (OMXMaster::addVendorPlugin 的桥)
+       2) mediacodec.rc 的 group 补 media  (AVP 通道权限)
+       3) 本文件 (codec 表能正常解析)
+     ===================================================================== -->
+
 <!--
 <!DOCTYPE MediaCodecs [
 <!ELEMENT MediaCodecs (Decoders,Encoders)>
@@ -86,13 +119,20 @@ Only the three quirks included above are recognized at this point:
         <MediaCodec name="OMX.Nvidia.vp8.decode" type="video/x-vnd.on2.vp8" />
         <MediaCodec name="OMX.Nvidia.mjpeg.decoder" type="video/mjpeg" />
 
-        <MediaCodec name="OMX.Nvidia.mp3.decoder" type="audio/mpeg" />
-        <MediaCodec name="OMX.Nvidia.mp3.decoder" type="audio/mpeg-L2" />
+        <!-- 【7.1 兼容】同一个组件名不能在 <Decoders> 里重复声明两次：
+             MediaCodecList.cpp:737 的 if (mUpdate != (index >= 0)) return -EINVAL
+             会让整份 XML 解析中止并清空 mCodecInfos。多 type 必须写成 <Type> 子元素。 -->
+        <MediaCodec name="OMX.Nvidia.mp3.decoder">
+            <Type name="audio/mpeg" />
+            <Type name="audio/mpeg-L2" />
+        </MediaCodec>
         <MediaCodec name="OMX.Nvidia.eaacp.decoder" type="audio/mp4a-latm" />
 
-        <MediaCodec name="OMX.Nvidia.bypass.decoder" type="audio/ac3" />
-        <MediaCodec name="OMX.Nvidia.bypass.decoder" type="audio/x-eac3" />
-        <MediaCodec name="OMX.Nvidia.bypass.decoder" type="audio/dts" />
+        <MediaCodec name="OMX.Nvidia.bypass.decoder">
+            <Type name="audio/ac3" />
+            <Type name="audio/x-eac3" />
+            <Type name="audio/dts" />
+        </MediaCodec>
 
         <!-- ffmpeg video codec -->
         <MediaCodec name="OMX.ffmpeg.mpeg2v.decoder" type="video/mpeg2" />

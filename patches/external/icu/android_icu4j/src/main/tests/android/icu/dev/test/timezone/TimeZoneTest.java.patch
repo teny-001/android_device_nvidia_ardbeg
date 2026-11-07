@@ -1,0 +1,20 @@
+--- a/external/icu/android_icu4j/src/main/tests/android/icu/dev/test/timezone/TimeZoneTest.java
++++ b/external/icu/android_icu4j/src/main/tests/android/icu/dev/test/timezone/TimeZoneTest.java
+@@ -2228,7 +2228,16 @@
+     @Test
+     public void Test11619_UnrecognizedTimeZoneID() {
+         VTimeZone vzone = VTimeZone.create("ABadTimeZoneId");
+-        TestFmwk.assertNull("", vzone);
++        // [ardbeg] 原写法是 `TestFmwk.assertNull("", vzone);`，但本树的
++        // TestFmwk（src/main/tests/android/icu/dev/test/TestFmwk.java:1910）把
++        // assertNull 声明成**实例方法**：
++        //     protected boolean assertNull(String message, Object actual)
++        // 用「类名.方法」的方式做静态限定调用，Jack 报
++        //     The method assertNull(String, Object) from the type TestFmwk is not visible
++        // （javac 大概会报 non-static method cannot be referenced from a static context）。
++        // 这里改成不带类名前缀的调用：TimeZoneTest 继承自 TestFmwk，
++        // protected 成员在子类内部可以直接访问，语义与原意一致。
++        assertNull("", vzone);
+     }
+ 
+     private static boolean isDaylightTimeAvailable(TimeZone tz, long start) {

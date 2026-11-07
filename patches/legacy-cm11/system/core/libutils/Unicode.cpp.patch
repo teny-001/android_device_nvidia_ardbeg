@@ -1,0 +1,29 @@
+--- a/system/core/libutils/Unicode.cpp
++++ b/system/core/libutils/Unicode.cpp
+@@ -19,6 +19,26 @@
+ 
+ #include <stddef.h>
+ 
++// ============================================================================
++// [新增 2026-10-28] 补 <limits.h>，修复宿主侧（libutils host）编译错误：
++//
++//     system/core/libutils/Unicode.cpp:188:13: error:
++//         'SSIZE_MAX' was not declared in this scope
++//     system/core/libutils/Unicode.cpp:439:13: error:
++//         'SSIZE_MAX' was not declared in this scope
++//
++// 原因：本文件只 include 了 <stddef.h>，而 SSIZE_MAX 并不在那里。
++//   在 Android 4.4 的 bionic 里，它是通过 <netinet/in.h> → <sys/types.h>
++//   → <limits.h> 这条链间接带进来的，所以在设备侧（target）一直能编过。
++//   但宿主侧用的是宿主机 glibc 的头文件，<netinet/in.h> 不会把
++//   SSIZE_MAX 带进来，于是 host 版 libutils 编译失败。
++//
++// 显式 include <limits.h> 对两侧都正确：bionic 和 glibc 的 limits.h
++// 都定义了 SSIZE_MAX（glibc 里它由 _GNU_SOURCE/__USE_XOPEN2K8 控制，
++// g++ 默认就带 _GNU_SOURCE，实测可用）。
++// ============================================================================
++#include <limits.h>
++
+ #ifdef HAVE_WINSOCK
+ # undef  nhtol
+ # undef  htonl

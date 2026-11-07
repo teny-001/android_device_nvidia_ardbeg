@@ -1,0 +1,60 @@
+--- a/frameworks/compile/libbcc/libbcc-host-build.mk
++++ b/frameworks/compile/libbcc/libbcc-host-build.mk
+@@ -21,6 +21,57 @@
+   -D__HOST__ \
+   $(LOCAL_CFLAGS)
+ 
++# [修改 2026-10-28] 宿主 64 位编译时，libbcc 的 ExecutionEngine 是纯 32 位设计，
++# 必须放宽两个诊断，否则整个宿主 libbcc（进而 bcc / bcc_compat）编不出来，
++# Gallery2 的 RenderScript 资源编译就没有工具可用。
++#
++# 具体报错（GCC 4.8 x86_64 -O2）：
++#   lib/ExecutionEngine/ELFObjectLoaderImpl.cpp:94:73: error:
++#       cast from 'unsigned char*' to 'llvm::ELF::Elf32_Addr {aka unsigned int}'
++#       loses precision [-fpermissive]
++#   lib/ExecutionEngine/../include/impl/ELFObject.hxx:384/438/488/526/537/563/605:
++#       error: cast to pointer from integer of different size
++#       [-Werror=int-to-pointer-cast]
++#
++# 根因：这套 ObjectLoader 是"把 32 位 ELF 目标码映射进宿主进程再执行"的 JIT
++# 加载器，代码里直接把宿主指针塞进 Elf32_Addr（32 位），再从 Elf32_Addr
++# 强转回指针。在 64 位宿主上指针是 8 字节，这两步都会截断。
++# 想真正修好，得把 ELFObject / ELFSection / ELFSymbol 整套模板从 32 位
++# 改成 ELFW 宽度自适应 —— 那是几百行的结构性改造，而且改完也没人受益。
++#
++# 为什么可以只放宽诊断、不真修：
++#   1) 编译期唯一会调用 libbcc 的是 bcc_compat（build/core/config.mk:340
++#      的 BCC_COMPAT），它只做 .bc -> .o 的离线编译，走的是
++#      RSCompilerDriver::compile()，**完全不碰 ExecutionEngine**；
++#   2) RenderScript 源码编译用的是 llvm-rs-cc（config.mk:339 的 LLVM_RS_CC），
++#      和 libbcc 无关；
++#   3) 宿主 bcc 的 -f（执行）模式在 ROM 构建流程里从来没被调用过。
++#   所以被截断的指针在构建过程中不会被执行到。若将来真要用宿主 JIT，
++#   必须回来做 ELFW 改造，不能指望这段代码。
++#
++# -Wno-error=int-to-pointer-cast 比 -Werror 更具体，会覆盖它（GCC 的
++# 规则是"更具体的选项优先"，与命令行顺序无关）。
++#
++# [修正 2026-10-28] 必须用 LOCAL_CPPFLAGS 而不是 LOCAL_CFLAGS：
++#   -fpermissive 只对 C++/ObjC++ 有效，libbccSupport 里有纯 C 文件
++#   （lib/Support/sha1.c），走 LOCAL_CFLAGS 会报
++#       cc1: error: command line option '-fpermissive' is valid for
++#            C++/ObjC++ but not for C [-Werror]
++#   binary.mk:733 把 LOCAL_CPPFLAGS 只塞给 C++ 编译的 PRIVATE_CPPFLAGS，
++#   正好符合需求。
++#
++# 另外 -fpermissive 只是把"cast loses precision"从 error 降级成
++# pedwarn，紧接着又会被 -Werror 提回 error（日志里显示 [-Werror=permissive]）。
++# 这里不能写 -Wno-error=permissive —— GCC 4.8 会直接报
++#     cc1plus: error: -Werror=permissive: no option -Wpermissive
++# 因为 permerror() 根本不是通过 -W<name> 注册的常规警告，它只受
++# -fpermissive 控制。所以改用**不带参数**的 -Wno-error，把这几个模块的
++# -Werror 整体取消，让 -fpermissive 降级出来的 pedwarn 真正只当警告。
++# 代价：这几个宿主模块的其它警告不再中断编译。可以接受 ——
++# 它们只是打包工具，不是要上机的代码。
++ifeq ($(BUILD_HOST_64bit),1)
++LOCAL_CPPFLAGS += -fpermissive -Wno-error
++endif
+ ifeq ($(TARGET_BUILD_VARIANT),eng)
+ libbcc_CFLAGS += -DANDROID_ENGINEERING_BUILD
+ else

@@ -1,0 +1,63 @@
+# ============================================================================
+# 【CM14.1 on ardbeg 移植修复 2026-11-05】sf_hwc_off —— 关掉 HWC 合成，改用 GLES
+#
+# 【这个文件解决什么问题】
+#   原厂 4.4.4 的 hwcomposer.tegra.so 在 7.1 的 SurfaceFlinger 下会写坏堆，
+#   导致 SF 每 40~100 秒 SIGSEGV 一次，而且崩一次就永久黑屏
+#   （所有客户端的 BufferQueue 变成孤儿，WMS 不会重建 Surface）。
+#
+#   修复办法是在 SF 起来后立刻通过 binder 命令把它切到纯 GLES 合成：
+#       service call SurfaceFlinger 1008 i32 1
+#   对应 SurfaceFlinger_hwc1.cpp 的：
+#       case 1008:  // toggle use of hw composer
+#           mDebugDisableHWC = n ? 1 : 0;
+#           invalidateHwcGeometry();
+#           repaintEverything();
+#
+#   原理和实测数据见 sf_hwc_off.sh 顶部注释。
+#
+# 【为什么用 post-fs 而不是 post-fs-data / sys.boot_completed】
+#   这是本文件最关键的一点，踩过两次坑：
+#     - SF 的 service 定义是 class core，在 on init 的 class_start core
+#       阶段就起来了；
+#     - SF 的崩溃点在开机后 40~100 秒（实测 22:55 那次是 uptime 44 秒）；
+#     - 而 sys.boot_completed=1 要等到 45 秒左右；
+#     - 连 post-fs-data 都太晚：实测 uptime 40 秒左右才触发，
+#       那时 SF 已经崩了（pid 269 -> 2697）。
+#   所以改用 on post-fs —— 它在 init.ardbeg.rc 的 mount_all /fstab.ardbeg
+#   完成之后立即触发（/system 已挂载，脚本可执行），比 post-fs-data 早。
+#
+#   注意不能用 on fs：那一段里正在执行 mount_all，此时 /system 还没挂好，
+#   /system/bin/sh 和 sf_hwc_off.sh 都还不存在。
+#
+#   如果以后发现 post-fs 仍然来不及（比如 fsck 特别慢），
+#   正解是把 mDebugDisableHWC 的初值直接改掉：
+#       SurfaceFlinger_hwc1.cpp:157  mDebugDisableHWC(0)
+#   把它 patch 成 1（二进制补丁 libsurfaceflinger.so 的构造函数），
+#   这样 SF 从第一帧起就是纯 GLES 合成，完全不依赖启动时机。
+#
+# 【为什么 class 写 late_start 但又用 post-fs-data 显式 start】
+#   class 只影响 init 在 class_start 阶段批量拉起哪些服务；
+#   start <name> 是显式启动，不受 class 阶段限制。
+#   写 late_start + disabled 是为了不让它在 class_start 阶段被重复拉起，
+#   保证只有 post-fs-data 这一条启动路径，行为可预期。
+#
+# 【为什么 group 里要带 system】
+#   SF 是 user system，我们的脚本是 root，root 本身能发 binder；
+#   带 system 组是为了以后若改成 user system 运行也还能工作，
+#   与 zz-persist-log.rc 里带 log 组的思路一致。
+#
+# 【实测】
+#   设置前：SF 每 40~100 秒崩一次，崩后永久黑屏（screencap 10 KB）。
+#   设置后：SF pid 全程不变（实测连续 4 分钟以上），
+#           桌面 / 设置 / 应用全部正常渲染（screencap 1.87 MB）。
+# ============================================================================
+
+service sf_hwc_off /system/bin/sh /system/bin/sf_hwc_off.sh
+    class late_start
+    user root
+    group root system
+    disabled
+
+on post-fs
+    start sf_hwc_off

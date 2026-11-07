@@ -1,0 +1,51 @@
+--- a/system/core/init/Android.mk
++++ b/system/core/init/Android.mk
+@@ -84,12 +84,46 @@
+ 	$(TARGET_ROOT_OUT)/sbin/ueventd \
+ 	$(TARGET_ROOT_OUT)/sbin/watchdogd
+ 
++# [修改 2026-10-29] 不再用符号链接，改为复制一份真实的 init 二进制。
++#
++# 【现象】
++#   刷入本树编译的 boot.img 后，系统跑到 9 秒就卡住，最终 init 主动重启进
++#   recovery。ramoops（/sys/fs/pstore/console-ramoops）里的关键三行：
++#       [ 9.662646] init: cannot find '/sbin/ueventd', disabling 'ueventd'
++#       [14.037444] init: Timed out waiting for /dev/.coldboot_done
++#       [34.032986] fs_mgr: Failed to mount ... by-name/APP at /system
++#                   ... error: No such file or directory
++#   连锁反应：ueventd 没启动 -> /dev/block/platform/.../by-name/ 下的符号
++#   链接没人创建 -> mount_all 找不到 APP 分区 -> /system 挂不上 ->
++#   /system/bin/* 全部 "cannot find" -> healthd（critical）反复崩溃 4 次 ->
++#   init 判定 "rebooting into recovery mode"。
++#
++# 【为什么是这里】
++#   cpio 里 sbin/ueventd 确实是个 symlink 条目，数据是 "../init"，顺序上
++#   sbin 目录（第 39 条）也在 sbin/ueventd（第 42 条）之前，格式没问题。
++#   但实测这个相对链接在本设备的 initramfs 解包后无法被 access() 到：
++#   换成真实的 init 副本（mode 100750）后，同样的 rc、同样的内核，
++#   系统立刻能正常启动（4.4.4 + characteristics=tv，/cache 日志正常落盘）。
++#   所以这里绕开符号链接，直接用 cp。
++#
++# 【代价】
++#   ramdisk 从 564KB 涨到 804KB（多两份 187KB 的 init）。boot 分区 40MB，
++#   完全放得下，启动时间无可感知差异。
++#
++# 【注意】
++#   recipe 里必须用 $(INIT_SRC) 这个解析期快照过的变量，不能直接用
++#   $(LOCAL_INSTALLED_MODULE)。理由同 gyp 生成的 .mk 里那些
++#   `gyp_local_path := $(LOCAL_PATH)` —— GNU Make 的 recipe 行是延迟展开的，
++#   而 LOCAL_* 是全局变量，等这条 recipe 真正执行时，它可能已经被后面
++#   include 的别的模块改掉了。
+ $(SYMLINKS): INIT_BINARY := $(LOCAL_MODULE)
++$(SYMLINKS): INIT_SRC := $(LOCAL_INSTALLED_MODULE)
+ $(SYMLINKS): $(LOCAL_INSTALLED_MODULE) $(LOCAL_PATH)/Android.mk
+-	@echo "Symlink: $@ -> ../$(INIT_BINARY)"
++	@echo "Copy: $@ <- $(INIT_SRC) (真实副本，替代符号链接 ../$(INIT_BINARY))"
+ 	@mkdir -p $(dir $@)
+ 	@rm -rf $@
+-	$(hide) ln -sf ../$(INIT_BINARY) $@
++	$(hide) cp $(INIT_SRC) $@
++	$(hide) chmod 0750 $@
+ 
+ ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINKS)
+ 

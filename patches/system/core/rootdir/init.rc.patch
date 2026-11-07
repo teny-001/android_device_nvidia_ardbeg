@@ -1,0 +1,28 @@
+--- a/system/core/rootdir/init.rc
++++ b/system/core/rootdir/init.rc
+@@ -33,6 +33,25 @@
+     start ueventd
+ 
+ on init
++    # =========================================================================
++    # [CM14.1-on-ardbeg 修复 2026-11-05] 给 4.4.4 的 Tegra GL 库补一个相对路径
++    #
++    # 原厂 libGLESv2_tegra.so 的惰性初始化里做的是:
++    #     NvOsLibraryLoad("egl/libEGL_tegra.so")   -> dlopen(相对路径)
++    #     NvOsLibraryGetSymbol(h, "NvEglInitClientFunctions")
++    # 这是 4.4.4 时代 linker 的语义(相对路径按 /system/lib 解析)。
++    # 7.1 的 bionic linker 把**带 '/' 的相对路径按进程 CWD 解析**,
++    # 而 init 的 CWD 是 '/', 于是它去找 /egl/libEGL_tegra.so, 找不到,
++    # dlopen 失败且不打任何日志, GLESv2 就带着一张空函数表继续跑 ->
++    # 任何 GPU 调用都变成空指针/静默失败 (表现为整机没有硬件合成、
++    # WebView / 相机 / 视频全部黑屏或直接崩)。
++    #
++    # 修法: 在 / 下放一个 /egl 符号链接指向 /system/lib/egl,
++    # 让那个相对路径能解析成功。放在 on init 是因为这一阶段 / 还是
++    # ramfs 可写, 而 /system 要等到 on fs 的 mount_all 才挂上,
++    # 符号链接本身不依赖 /system 存在, 先建好即可。
++    # =========================================================================
++    symlink /system/lib/egl /egl
+     sysclktz 0
+ 
+     # Mix device-specific information into the entropy pool

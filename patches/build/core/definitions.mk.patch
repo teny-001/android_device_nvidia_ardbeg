@@ -1,0 +1,57 @@
+--- a/build/core/definitions.mk
++++ b/build/core/definitions.mk
+@@ -2096,6 +2096,36 @@
+ # - below we write the list of java files to java-source-list to avoid argument
+ #   list length problems with Cygwin
+ # - we filter out duplicate java file names because Jack doesn't like them.
++# ===========================================================================
++# [ardbeg] Jack 的 proguard 配置需要一个「不含空格」的 basedirectory
++#
++# 背景：jack-java-to-dex / java-to-jack 会生成一个 proguard 参数文件
++#   $(intermediates)/with-local/classes.dex.flags
++# 第一行是 `-basedirectory $(CURDIR)`，用来给后面那些相对路径（例如
++# `-include build/core/proguard.flags`）提供解析基准。
++#
++# 问题：本工程源码树的真实路径是
++#   /home/dy/WorkBuddy AI/2026-10-23-16-34-21/aosp-src
++# 里面带空格。而 GNU make 的 $(CURDIR) 取的是 getcwd() 的**物理路径**，
++# 不会保留 /home/dy/aosp14 这种无空格别名，于是这一行展开成
++#   -basedirectory /home/dy/WorkBuddy AI/2026-10-23-16-34-21/aosp-src
++# Jack 解析 .flags 文件时按空白切分参数，路径被拆成两段，直接报
++#   Error while parsing '.../with-local/classes.dex.flags':1
++# 结果 Java 编译链在最后一步断掉（framework / okhttp 等 jar 都已经编好，
++# 只有带 proguard 配置的 APPS 模块会炸，很容易误判成 proguard 规则问题）。
++#
++# 处理：把 basedirectory 抽成一个可覆盖的变量。
++#   - 默认仍是 $(CURDIR)，对路径不含空格的正常环境行为完全不变；
++#   - 本工程在 env.sh 里 export JACK_BASEDIRECTORY=/home/dy/aosp14
++#     （指向同一棵树的无空格软链接），环境变量优先于这里的默认值。
++# 注意：这个路径必须是 Jack 进程能访问到的真实目录，因为
++#   `-include build/core/proguard.flags` 这类相对路径要基于它解析；
++#   软链接指向同一棵树，解析结果一致。
++# ===========================================================================
++ifndef JACK_BASEDIRECTORY
++JACK_BASEDIRECTORY := $(CURDIR)
++endif
++
+ define jack-java-to-dex
+ $(hide) rm -f $@
+ $(hide) rm -f $(PRIVATE_CLASSES_JACK)
+@@ -2111,7 +2141,7 @@
+ $(hide) tr ' ' '\n' < $(PRIVATE_JACK_INTERMEDIATES_DIR)/java-source-list \
+     | $(NORMALIZE_PATH) | sort -u > $(PRIVATE_JACK_INTERMEDIATES_DIR)/java-source-list-uniq
+ $(if $(PRIVATE_JACK_PROGUARD_FLAGS), \
+-    $(hide) echo -basedirectory $(CURDIR) > $@.flags; \
++    $(hide) echo -basedirectory $(JACK_BASEDIRECTORY) > $@.flags; \
+     echo $(PRIVATE_JACK_PROGUARD_FLAGS) >> $@.flags; \
+ )
+ $(if $(PRIVATE_EXTRA_JAR_ARGS),
+@@ -2289,7 +2319,7 @@
+ $(hide) tr ' ' '\n' < $(PRIVATE_JACK_INTERMEDIATES_DIR)/java-source-list \
+     | $(NORMALIZE_PATH) | sort -u > $(PRIVATE_JACK_INTERMEDIATES_DIR)/java-source-list-uniq
+ $(if $(PRIVATE_JACK_PROGUARD_FLAGS), \
+-    $(hide) echo -basedirectory $(CURDIR) > $@.flags; \
++    $(hide) echo -basedirectory $(JACK_BASEDIRECTORY) > $@.flags; \
+     echo $(PRIVATE_JACK_PROGUARD_FLAGS) >> $@.flags; \
+ )
+ $(if $(PRIVATE_EXTRA_JAR_ARGS),

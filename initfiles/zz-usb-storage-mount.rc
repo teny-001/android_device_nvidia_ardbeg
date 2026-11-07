@@ -1,0 +1,93 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 新增 2026-11-06] U 盘自动可见化守护
+#
+# 这个服务只做一件事：让插进来的 U 盘从 /mnt/media_rw/<UUID>
+# 变成 /storage/<UUID>，也就是让文件管理器和设置里的存储能看见它。
+#
+# 【为什么需要它 —— 完整根因链的最后一层】
+#
+# 修完前面三层之后，链路已经走到（实测 dumpsys mount）：
+#
+#     DiskInfo{disk:8_0}: flags=USB size=15953035264 label=ADATA
+#     VolumeInfo{public:8_1}: type=PUBLIC state=MOUNTED fsType=vfat
+#                             path=/mnt/media_rw/94B5-BDEB
+#
+# vold 挂上了，但挂在 /mnt/media_rw/<UUID>（权限 0700 root:root），
+# /storage/ 下什么都没有。
+#
+# 根因在 frameworks/base/services/core/java/com/android/server/MountService.java
+# 的 onVolumeCreated()，对 TYPE_PUBLIC 只有两种情况才给 VISIBLE 标志：
+#   1) mPrimaryStorageUuid == "primary_physical" 且 disk 是 defaultPrimary
+#   2) disk 是 adoptable（fstab 里有 encryptable=userdata）
+# 本机 dumpsys mount 里 "Primary storage UUID: null"，U 盘也不是 adoptable，
+# 两个条件都不成立 -> mountFlags=0 -> framework 发
+#     {6 volume mount public:8_1 0 0}
+# -> vold 的 PublicVolume::doMount() 里
+#     if (!(getMountFlags() & MountFlags::kVisible)) return OK;
+# 直接返回，不 fork sdcard，不建 /storage/<UUID>。
+#
+# 【脚本怎么修】
+# 轮询 /proc/mounts，发现 /mnt/media_rw/<UUID> 挂上了但 /storage/<UUID>
+# 不存在时，用 vdc 重新 mount 一次并带上 VISIBLE(2)：
+#     vdc volume unmount public:8_1
+#     vdc volume mount   public:8_1 2 0
+# 然后 vold 就会 fork sdcard，建出 /dev/fuse on /storage/<UUID>。
+#
+# 【为什么用 late_start】
+# vold 是 class core，在 on init 就起来了；脚本内部还会再轮询等
+# init.svc.vold == running，所以 late_start 足够，不必更早。
+#
+# 【为什么用 oneshot】
+# 脚本本身是个 while true 的死循环，不会自己退出。
+# oneshot 表示"退出后不要自动重启"，避免万一异常退出后 init 疯狂拉起。
+# （注意：这里不是 disabled，所以 late_start 阶段会自动启动一次。）
+#
+# 【长期正解】
+# 改 MountService.onVolumeCreated()，在 TYPE_PUBLIC 分支里无条件加
+#     vol.mountFlags |= VolumeInfo.MOUNT_FLAG_VISIBLE;
+# 补丁见 patches/frameworks/base/services/core/java/com/android/server/
+#      MountService.java.patch
+# 全量编译生效后可以把这个服务删掉。
+#
+# 【服务名为什么是 usb_storage_mnt 而不是 usb_storage_mount —— 踩过的坑】
+#   一开始服务名写的是 usb_storage_mount（17 个字符），结果：
+#     - dmesg 里明明有
+#           init: (Parsing /system/etc/init/zz-usb-storage-mount.rc took 0.01s.)
+#       （说明文件被正常读取、正常解析了）
+#     - 但 getprop init.svc.usb_storage_mount 为空
+#     - setprop ctl.start usb_storage_mount 报
+#           init: no such service 'usb_storage_mount'
+#     - 而且 init **一条报错都不打**，极难定位。
+#
+#   根因在 system/core/init/service.cpp:856-868：
+#
+#       bool ServiceParser::IsValidName(const std::string& name) const {
+#           if (name.size() > 16) {
+#               return false;          // <-- 静默拒绝
+#           }
+#           for (const auto& c : name) {
+#               if (!isalnum(c) && (c != '_') && (c != '-')) return false;
+#           }
+#           return true;
+#       }
+#
+#   **7.1 的 init 规定服务名最长 16 个字符**（4.4.4 时代没有这个限制）。
+#   IsValidName 返回 false 后 ParseSection 直接 return false，
+#   此时 service_ 还是空的，于是 EndSection 里 if (service_) 不成立，
+#   服务根本没有被 AddService 进去 —— 整个过程没有任何 ERROR 日志。
+#
+#   usb_storage_mount = usb(3) + _(1) + storage(7) + _(1) + mount(5) = 17 > 16
+#   usb_storage_mnt   = usb(3) + _(1) + storage(7) + _(1) + mnt(3)   = 15  OK
+#
+#   顺带核对本设备上其它服务的名字长度，全部 ≤ 16 所以一直没事：
+#       usb_mtp_default  15      ardbeg_mediawd   14
+#       bootanim_killer  15      persist_logcat   14
+#       sf_hwc_off       10      ussr_setup       10
+#   以后新增任何 init 服务，名字一律控制在 16 字符以内。
+# =============================================================================
+
+service usb_storage_mnt /system/bin/usb_storage_mount.sh
+    class late_start
+    user root
+    group root system
+    oneshot

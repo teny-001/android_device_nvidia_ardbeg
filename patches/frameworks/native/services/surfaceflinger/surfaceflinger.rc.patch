@@ -1,0 +1,81 @@
+--- a/frameworks/native/services/surfaceflinger/surfaceflinger.rc
++++ b/frameworks/native/services/surfaceflinger/surfaceflinger.rc
+@@ -1,6 +1,77 @@
++# ============================================================================
++# 【CM14.1 on ardbeg 移植修复 2026-11-05】去掉 onrestart restart zygote
++#
++# 【症状】
++#   系统能启动完成（sys.boot_completed=1、Launcher 拿到焦点），
++#   但开机 30~90 秒后整机突然死掉：
++#       dmesg : init: Service 'surfaceflinger' (pid N) killed by signal 11
++#       dmesg : init: Service 'zygote' (pid M) killed by signal 9
++#       logcat: E Zygote: Exit zygote because system server (P) has terminated
++#   之后每 7 秒一轮，永远起不来，只有冷重启能恢复。
++#
++# 【根因链】
++#   1) 4.4.4 原厂 hwcomposer.tegra.so 与 7.1 的 hwc_layer_1_t 布局不一致：
++#        4.4.4: compositionType/hints/flags/handle/buffer/transform/blending/
++#               planeAlpha/sourceCrop/displayFrame/visibleRegionScreen/
++#               acquireFenceFd/releaseFenceFd
++#        7.1  : compositionType/hints/flags/union{handle,sidebandStream}/
++#               transform/blending/union{sourceCropi,sourceCropf}/
++#               displayFrame/visibleRegionScreen/acquireFenceFd/releaseFenceFd
++#      7.1 没有独立的 buffer 字段、也没有 planeAlpha，sourceCrop 整体前移。
++#      厂商 HAL 按 4.4.4 的偏移读写 7.1 传进来的 layer 数组，越界写堆。
++#
++#      典型崩溃（debuggerd 解出厂商符号时）：
++#        #00 libutils.so            RefBase::decStrong(void const*)+37
++#        #01 hwcomposer.tegra.so    sp<GraphicBuffer>::operator=(GraphicBuffer*)+22
++#        #02 hwcomposer.tegra.so    destroy_graphic_buffer+8
++#        #04 hwcomposer.tegra.so    glc_set+250
++#        #05 hwcomposer.tegra.so    hwc_composite_set+252
++#        #07 libsurfaceflinger.so   (SF 调 HWC set())
++#      另一种表现是 jemalloc 堆损坏：
++#        #00 libc.so     pthread_mutex_lock+1        (fault addr 0x8)
++#        #01 libc.so     je_tcache_bin_flush_large+132
++#        #03 libc.so     je_malloc+762
++#        #04 libutils.so SharedBuffer::alloc(unsigned int)+24
++#        #07 libui.so    Region::rasterizer::operator()(Rect const&)+48
++#      结果是 SurfaceFlinger 平均每 16 秒 SIGSEGV 一次。
++#
++#   2) 这一行 `onrestart restart zygote` 把局部故障放大成整机死亡：
++#        SF 崩 -> init 重启 SF -> onrestart restart zygote
++#              -> init 杀掉 zygote 整个进程组（system_server 也在里面，SIGKILL）
++#              -> zygote 的 SigChldHandler 发现 system_server 没了，
++#                 执行 kill(getpid(), SIGKILL)
++#              -> init 重启 zygote -> 新 system_server
++#              -> servicemanager 里 activity/window/package 等旧 handle 还在。
++#                 实测 servicemanager 只对 netd / media.* 打出
++#                 "service 'x' died"，对 system_server 注册的服务从未打出，
++#                 说明死亡通知没有送达，新 system_server 拿到的是死 handle，
++#                 一调就 DeadObjectException
++#              -> RemoteException.rethrowFromSystemServer() 抛 DeadSystemException
++#              -> RuntimeInit$UncaughtHandler 捕获后 Process.killProcess(自己)
++#              -> 无限循环
++#
++# 【修法】
++#   去掉 `onrestart restart zygote`。SF 崩了就让 init 单独重启 SF，
++#   zygote 与 system_server 保持存活。
++#   实测：SF 在 uptime 118 秒崩了一次，system_server(1491) 与 zygote(243)
++#   的 pid 全程不变，SF 自己重启（224 -> 4399）后系统继续可用；
++#   而修改前任何一次 SF 崩溃都会导致永久砖机。
++#
++# 【代价】
++#   SF 重启后，此前已创建 Surface 的应用会拿到失效的 Surface（表现为黑屏），
++#   需要重新创建。但这远好于整机变砖，且系统不会失去响应。
++#
++# 【配套改动】
++#   1) 二进制修补 hwcomposer.tegra.so 的 destroy_graphic_buffer，
++#      把 SF 崩溃频率从「每 16 秒」降到「偶发」：patches/tools/patch_hwc.py
++#   2) SF 重启后 onFirstRef() 会重新 ctl.start bootanim 并把
++#      service.bootanim.exit 置回 0，而 WindowManagerService 的
++#      mBootAnimationStopped 是一次性标志，不会再把 exit 置 1，
++#      于是开机动画永久盖住桌面。用 initfiles/zz-bootanim-fix.rc 的看门狗修正。
++# ============================================================================
+ service surfaceflinger /system/bin/surfaceflinger
+     class core
+     user system
+     group graphics drmrpc readproc
+-    onrestart restart zygote
++    # onrestart restart zygote    # ← 见上方说明，已禁用
+     writepid /dev/stune/foreground/tasks

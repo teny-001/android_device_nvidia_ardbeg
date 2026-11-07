@@ -1,0 +1,57 @@
+--- a/external/chromium_org/third_party/WebKit/Source/build/scripts/preprocessor.pm
++++ b/external/chromium_org/third_party/WebKit/Source/build/scripts/preprocessor.pm
+@@ -55,6 +55,54 @@
+         push(@args, qw(-E -P -x c++));
+     }
+ 
++    # [修改 2026-10-28] 预处理器的绝对路径写死，本机上不存在时自动回退。
++    #
++    # 背景：Blink 的 IDL 绑定生成需要先用 C 预处理器展开 .idl 里的 #if，
++    # 命令行由 gyp 生成并**固化在已提交的 .mk 文件里**：
++    #   third_party/WebKit/Source/build/scripts/scripts.gypi:60
++    #     'preprocessor': '--preprocessor "/usr/bin/gcc -E -P -x c++"'
++    #   -> third_party/WebKit/Source/bindings/bindings_sources.target.linux-arm.mk
++    #      里出现上百次 "--preprocessor \"/usr/bin/gcc -E -P -x c++\""
++    #
++    # 本机是 Flatpak 打包的最小环境，**没有 /usr/bin/gcc**（编译器在
++    # /home/dy/tc-wb/hostbin 下），于是每条绑定生成都报：
++    #   Can't exec "/usr/bin/gcc": 没有那个文件或目录 at .../IPC/Open3.pm line 178.
++    #   open2: exec of /usr/bin/gcc -E -P -x c++ .../CSSRule.idl failed
++    #   make: *** [.../bindings/V8CSSRule.cpp] Error 2
++    #
++    # 为什么不在 .mk 里全局替换：那三个 .mk 是 gyp 生成的，每个文件里这个
++    # 字符串出现上百次，生成的补丁会非常庞大且难以审阅；而且一旦将来重新
++    # 跑 gyp 就会被覆盖。改在这里只需一处，且对所有调用方（generate_bindings.pl、
++    # code_generator_v8.pm 等）都生效。
++    #
++    # 回退顺序：$ENV{CC} -> PATH 里的 gcc / cc / clang。
++    # 预处理只做 #if/#define 展开，用哪个 C 编译器都不影响结果。
++    if ($preprocessor) {
++        my @tokens = split(' ', $preprocessor);
++        if ($tokens[0] =~ m{^/} && !-x $tokens[0]) {
++            my $alt = $ENV{CC};
++            $alt = '' if $alt && ($alt =~ / / || !-x $alt);
++            if (!$alt) {
++                $alt = '';
++                CANDIDATE:
++                foreach my $c (qw(gcc cc clang)) {
++                    foreach my $d (split(/:/, $ENV{PATH} || '')) {
++                        next unless $d;
++                        # 路径里**不能有空格**：下面的 open2() 是把整个命令行
++                        # 按空格切词的，路径含空格会被切成两段，报
++                        #   Can't exec "/home/dy/WorkBuddy": 没有那个文件或目录
++                        next if $d =~ / /;
++                        if (-x "$d/$c") { $alt = "$d/$c"; last CANDIDATE; }
++                    }
++                }
++            }
++            if ($alt) {
++                $tokens[0] = $alt;
++                $preprocessor = join(' ', @tokens);
++            }
++        }
++    }
++
+     # Remove double quotations from $defines and extract macros.
+     # For example, if $defines is ' "A=1" "B=1" C=1 ""    D  ',
+     # then it is converted into four macros -DA=1, -DB=1, -DC=1 and -DD.

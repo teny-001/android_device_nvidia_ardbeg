@@ -1,0 +1,79 @@
+--- a/external/srec/srec/EventLog/src/EventLogImpl.c
++++ b/external/srec/srec/EventLog/src/EventLogImpl.c
+@@ -49,6 +49,8 @@
+ #else
+ #include <time.h> /* For CLK_TCK / CLOCKS_PER_SEC */
+ #include <sys/times.h>  /* for times() */
++/* [修改 2026-10-28] getpid() 需要 unistd.h，见下面 TIMESTAMP_LENGTH 处的说明 */
++#include <unistd.h>
+ #ifndef CLK_TCK
+ #define CLK_TCK CLOCKS_PER_SEC
+ #endif
+@@ -156,7 +158,12 @@
+   SR_EventLogImpl *impl, *any_existing_eventlog;
+   ESR_ReturnCode rc;
+   LCHAR* dataCaptureDir;
+-#define TIMESTAMP_LENGTH 18
++#define TIMESTAMP_LENGTH 40
++/*
++ * [修改 2026-10-28] 原来是 18。为什么改大：下面生成的目录名/文件名要追加进程号，
++ * 最长组合是 10 位 epoch 秒 + '_' + 7 位 pid + '\0' = 19 字节，18 会溢出。
++ * 这里留到 40 是为了同时容下非 ANDROID 分支的 14 位日期串 + '_' + pid。
++ */
+   LCHAR timeStr[TIMESTAMP_LENGTH];
+   struct tm *ct, ct_r;
+   PTimeStamp timestamp;
+@@ -233,10 +240,52 @@
+  * The existing functions did not work on the desired platform, hence this code for the device.
+  */
+     gettimeofday ( &dir_stamp, NULL );
+-    sprintf(timeStr, "%lu", (unsigned long) dir_stamp.tv_sec );
++/*
++ * [修改 2026-10-28] 追加进程号，修并行编译时的目录名冲突。
++ *
++ * 报错原文（make -j16 编 external/srec 的 .g2g 语法文件时）：
++ *     ESR_IDENTIFIER_COLLISION
++ *     ESR_IDENTIFIER_COLLISION in external/srec/srec/Session/src/SR_Session.c:40
++ *     Error: SR_SessionCreate(external/srec/config/en.us/baseline11k.par)
++ *            ESR_IDENTIFIER_COLLISION
++ *     make: *** [.../phone_type_choice.g2g] Error 19
++ *
++ * 根因：
++ *   1. baseline11k.par 第 32 行 `cmdline.DataCaptureDirectory = logs`，
++ *      所以日志目录是相对当前工作目录的 logs/（构建时就是源码树根）。
++ *   2. 下面这段代码用 gettimeofday 的 **tv_sec（秒级精度）** 拼目录名，
++ *      得到 logs/<epoch 秒>/。原来只写 "%lu"，一秒内所有进程拿到的名字完全一样。
++ *   3. external/srec/config/en.us/Android.mk 里 VoiceDialer / boolean /
++ *      phone_type_choice 三个 .g2g 是三条独立规则，make -j 会并行跑三个
++ *      grxmlcompile。它们在同一秒启动 → 第二个 mkdir 同一路径。
++ *   4. 注意这一处 mkdir 和上面创建 logs/ 的那一处**处理方式不同**：
++ *      上一处写成 `if (rc != ESR_SUCCESS && rc != ESR_IDENTIFIER_COLLISION)`，
++ *      容忍"目录已存在"；而这一处是 `if (rc != ESR_SUCCESS) goto CLEANUP;`，
++ *      于是碰撞直接变成致命错误，grxmlcompile 返回 19。
++ *      上游代码在这里留了注释说"1 秒精度下目录已存在基本意味着有 bug"，
++ *      他们没想到的是**并行构建**这个场景。
++ *
++ * 为什么加 pid 而不是把碰撞也容忍掉：
++ *   如果只是容忍碰撞，两个进程会共用同一个 logs/<秒>/ 目录，然后都
++ *   `pfopen(SWIevent-<秒>.log, "w")` 以截断模式打开同一个文件，日志互相覆盖。
++ *   加 pid 后每个进程一个独立目录，既不碰撞也不互相覆盖，
++ *   同时保留了"每次运行一份日志"这个原有语义。
++ *
++ * 注意：这里改的是**目录名和日志文件名**，只影响调试日志的落盘路径，
++ * 不参与任何功能逻辑，对设备运行没有副作用。
++ */
++    sprintf(timeStr, "%lu_%ld", (unsigned long) dir_stamp.tv_sec, (long) getpid() );
+ #else
+     PTimeStampSet(&timestamp);
+     ct = localtime_r(&timestamp.secs, &ct_r);
++    /*
++     * [说明 2026-10-28] 这个分支有完全相同的"秒级精度撞名"问题，但**故意不改**：
++     * 它是 #ifdef ANDROID 的 #else 分支，在 _WIN32 宿主上也会被编译，
++     * 而 getpid() 在 Windows 上叫 _getpid() 且需要 <process.h>，
++     * 直接写 getpid() 会把这个分支编坏。
++     * 本次构建（Linux 宿主 + -DANDROID）走的是上面那个分支，这个分支是死代码，
++     * 不值得为它引入平台相关的复杂度。
++     */
+     sprintf(timeStr, "%04d%02d%02d%02d%02d%02d",
+             ct->tm_year + 1900, ct->tm_mon + 1, ct->tm_mday, ct->tm_hour,
+             ct->tm_min, ct->tm_sec);

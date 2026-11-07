@@ -1,0 +1,27 @@
+--- a/frameworks/base/services/core/java/com/android/server/MountService.java
++++ b/frameworks/base/services/core/java/com/android/server/MountService.java
+@@ -1305,6 +1305,24 @@
+                 vol.mountFlags |= VolumeInfo.MOUNT_FLAG_VISIBLE;
+             }
+ 
++            // [CM14.1-on-ardbeg] 让普通 U 盘也可见。
++            //
++            // 原生 7.1 只在上面的两个条件之一成立时才给 MOUNT_FLAG_VISIBLE：
++            //   1) mPrimaryStorageUuid == "primary_physical" 且 isDefaultPrimary()
++            //   2) disk.isAdoptable()（fstab 里带 encryptable=userdata）
++            // 本机 Primary storage UUID 是 null（没有物理主存储，走的是
++            // emulated 的 /data/media），U 盘也不是 adoptable，两个条件都不成立，
++            // 于是 mountFlags=0，vold 的 PublicVolume::doMount() 里
++            //     if (!(getMountFlags() & MountFlags::kVisible)) return OK;
++            // 直接返回 —— 不 fork /system/bin/sdcard，不建 /storage/<UUID>。
++            // 现象就是 U 盘在 dmesg / dumpsys mount 里一切正常（state=MOUNTED），
++            // 但文件管理器和设置里的存储完全看不到它。
++            //
++            // 这里无条件补上 VISIBLE：外接 U 盘本来就是给应用看的，
++            // 位置固定（/storage/<UUID>），满足 public API 的要求。
++            // 副作用仅仅是多 fork 一个 sdcard 进程，代价可以接受。
++            vol.mountFlags |= VolumeInfo.MOUNT_FLAG_VISIBLE;
++
+             vol.mountUserId = mCurrentUserId;
+             mHandler.obtainMessage(H_VOLUME_MOUNT, vol).sendToTarget();
+ 

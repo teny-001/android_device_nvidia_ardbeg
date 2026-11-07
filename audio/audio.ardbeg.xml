@@ -1,264 +1,249 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+================================================================================
+ g100 / ardbeg (NVIDIA SHIELD Tablet, Tegra K1 T124) 音频路由配置
+ 由 tinyhal 版 audio.primary.tegra 在 init_audio_config() 时加载，路径固定为
+     /system/etc/audio.$(ro.product.device).xml  =>  /system/etc/audio.ardbeg.xml
+ 见 configmgr/audio_config.c 的 open_config_file()
+
+================================================================================
+ [2026-10-28] 为什么要重写这个文件
+================================================================================
+ 这份文件原来是从「小米平板1 (xiaomi/mocha)」的设备树搬过来的，里面的控件名
+ 全部是 Wolfson WM8994 + NXP TFA9890 智能功放的：
+
+     RxDP Mux / RxDP SRC Switch / DSP DL Mux / DSP ASRC Switch
+     DAC L2 Mux / Mono DAC MIXL DAC L2 Switch
+     Left Spk Boot Patch / Left Spk Config File / Left Spk Preset File
+     Left Spk Output Voltage / Left Spk Max Coil Current ...
+
+ 而 g100 的 codec 是 Realtek RT5639，上面这些控件一个都不存在。
+ 三条互相独立的证据都指向 RT5639：
+   1. NVIDIA 官方开源设备包 platform/ardbeg/nvaudio_conf.xml 里 ardbeg 那段写着
+          card_name="tegrart5639"
+      整段的控件名也全是 RT5639 + tegra 机器驱动的。
+   2. 本设备树自带的预编译 DTB（prebuilt/tegra124-tn8-p1761-1470-a00.dtb）
+      里 ASoC 声卡名就是 "tegra-snd-rt5639"（另有 rt5645 节点但未启用）。
+   3. SHIELD Tablet 硬件方案就是 Tegra K1 + RT5639，没有外挂智能功放。
+
+ 后果：mixer_get_ctl_by_name() 对 WM8994 的控件名一个都找不到，每条 ctl 都打
+ "Control 'xxx' not found"，路由路径等于什么都没做，声卡停在 codec 上电默认
+ 状态（输出全关）。这就是「能开机、但音频故障」的直接原因。
+
+================================================================================
+ 本文件的内容来源
+================================================================================
+ 控件名和取值逐条对应 NVIDIA 官方
+     prebuilts-device-nvidia / platform/ardbeg/nvaudio_conf.xml
+ 里 name="music" 那段（card_name="tegrart5639"）的 path / playback / capture。
+ 只做「格式翻译」，把 NVIDIA HAL 的
+     alsa_device name="music" > playback > device name="speaker" > path name="on"
+ 翻成 tinyhal 的
+     device name="speaker" > path name="on"
+ 控件名和值一个没改。
+
+================================================================================
+ 关于 mixer 的 card 属性写「名字」
+================================================================================
+ 这里写的是声卡名而不是序号。原文件写死 card="1"（小米平板上 WM8994 恰好是
+ 1 号），但声卡序号是内核按 probe 顺序分的，在 ardbeg 上不一定是 1。
+ 为此在 configmgr/audio_config.c 里加了 card_index_from_attr()：遇到非数字就
+ 查 /proc/asound/cards 把名字换成真实序号。写纯数字时行为和以前完全一样，
+ 所以是向后兼容的。
+
+================================================================================
+ tinyhal 的路径语义（读代码确认，不是猜的）
+================================================================================
+   device name="X" > path name="on"    该输出/输入设备被选中时应用
+                     path name="off"   该设备被取消时应用
+ apply_route() 里先应用所有「被取消设备」的 off，再应用「新选中设备」的 on。
+ 设备名必须是 configmgr/audio_config.c 的 device_table[] 里那 14 个之一：
+   global / speaker / earpiece / headset / headset_in / headphone /
+   sco / sco_in / a2dp / usb / mic / back mic / voice / aux
+ 注意 aux 在表里映射的是 AUDIO_DEVICE_IN_AUX_DIGITAL（输入），所以 HDMI 输出
+ （AUDIO_DEVICE_OUT_AUX_DIGITAL）没法在这里配，走的是机器驱动里 SPDIF 的固定
+ 通路。这是本 HAL 的已知限制，不是本文件的 bug。
+================================================================================
+-->
 <audiohal>
-	<mixer card="1">
-		<init>
-            <ctl name="Left Spk Reg Addr" val="0x40"/>
-            <ctl name="Left Spk Reg Value" val="0x5a6b"/>
-            <ctl name="Left Spk Reg Addr" val="0x59"/>
-            <ctl name="Left Spk Reg Value" val="0x05cf"/>
-            <ctl name="Left Spk Reg Addr" val="0x40"/>
-            <ctl name="Left Spk Reg Value" val="0x0000"/>
 
-            <ctl name="Right Spk Reg Addr" val="0x40"/>
-            <ctl name="Right Spk Reg Value" val="0x5a6b"/>
-            <ctl name="Right Spk Reg Addr" val="0x59"/>
-            <ctl name="Right Spk Reg Value" val="0x05cf"/>
-            <ctl name="Right Spk Reg Addr" val="0x40"/>
-            <ctl name="Right Spk Reg Value" val="0x0000"/>
-
-            <ctl name="Left Spk Safeguard Threshold" val="3.53V"/>
-            <ctl name="Right Spk Safeguard Threshold" val="3.53V"/>
-            <ctl name="Left Spk Safeguard Bypass" val="0"/>
-            <ctl name="Right Spk Safeguard Bypass" val="0"/>
-
-            <ctl name="Left Spk Coil Value" val="1uH"/>
-            <ctl name="Right Spk Coil Value" val="1uH"/>
-            <ctl name="Left Spk Inductance" val="39uH"/>
-            <ctl name="Right Spk Inductance" val="39uH"/>
-
-            <!-- <ctl name="Left Spk Boot Patch" val="tfa9890_boot.patch"/> -->
-            <ctl name="Left Spk Boot Patch"  val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x62,0x6f,0x6f,0x74,0x2e,0x70,0x61,0x74,0x63,0x68"/>
-            <!--<ctl name="Right Spk Boot Patch" val="tfa9890_boot.patch"/> -->
-            <ctl name="Right Spk Boot Patch" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x62,0x6f,0x6f,0x74,0x2e,0x70,0x61,0x74,0x63,0x68"/>
-            <!-- <ctl name="Left Spk ROM Patch" val="tfa9890_rom.patch"/> -->
-            <ctl name="Left Spk ROM Patch" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x72,0x6f,0x6d,0x2e,0x70,0x61,0x74,0x63,0x68"/>
-            <!-- <ctl name="Right Spk ROM Patch" val="tfa9890_rom.patch"/> -->
-            <ctl name="Right Spk ROM Patch" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x72,0x6f,0x6d,0x2e,0x70,0x61,0x74,0x63,0x68"/>
-            <!-- <ctl name="Left Spk Speaker File" val="tfa9890_left.speaker"/> -->
-            <ctl name="Left Spk Speaker File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x6c,0x65,0x66,0x74,0x2e,0x73,0x70,0x65,0x61,0x6b,0x65,0x72"/>
-            <!-- <ctl name="Right Spk Speaker File" val="tfa9890_right.speaker"/> -->
-            <ctl name="Right Spk Speaker File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x72,0x69,0x67,0x68,0x74,0x2e,0x73,0x70,0x65,0x61,0x6b,0x65,0x72"/>
-            <!--<ctl name="Left Spk Config File" val="tfa9890.config"/> -->
-            <ctl name="Left Spk Config File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x2e,0x63,0x6f,0x6e,0x66,0x69,0x67"/>
-            <!-- <ctl name="Right Spk Config File" val="tfa9890.config"/> -->
-            <ctl name="Right Spk Config File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x2e,0x63,0x6f,0x6e,0x66,0x69,0x67"/>
+    <!--
+      init 里的控件只在 HAL 打开时应用一次，作用是给 codec 一个确定的初始状态：
+      输出开关全关、音量给安全值，等具体路由时再按需打开。
+      取值来源：nvaudio_conf.xml 中 alsa_device name="music" 下那个无 name 的 path。
+    -->
+    <mixer card="tegra-snd-rt5639">
+        <init>
+            <ctl name="Speaker Playback Volume" val="0x20"/>
+            <ctl name="HP Playback Volume" val="0x1e"/>
             <ctl name="Headphone Jack Switch" val="0"/>
-            <ctl name="Mic Jack Switch" val="0"/>
+            <ctl name="Int Spk Switch" val="0"/>
             <ctl name="Int Mic Switch" val="0"/>
-            <ctl name="BT Headphone Switch" val="0"/>
-            <ctl name="BT Mic Switch" val="0"/>
-            <ctl name="FM Switch" val="0"/>
-		</init>
-	</mixer>
+            <ctl name="Mic Jack Switch" val="0"/>
+            <ctl name="Codec VMixer Codec Switch" val="1"/>
+        </init>
+    </mixer>
 
-	<device name="speaker">
+    <!--
+      扬声器
+        SPK MIXR DAC R1 Switch  : 把 DAC 接到扬声器混音器（机器驱动的 DAPM 控件）
+        Speaker Playback Volume : 扬声器音量，0x20 是官方值
+        Int Spk Switch          : 内部扬声器功放使能，必须最后开，否则有 pop 音
+      官方 off 路径只关 Int Spk Switch、保留 SPK MIXR 连接，这里照抄，
+      避免关断时序引起爆音。
+    -->
+    <device name="speaker">
         <path name="on">
-          <ctl name="RxDP Mux" val="IF2 DAC"/>
-          <ctl name="RxDP SRC Switch" val="Normal"/>
-          <ctl name="DSP DL Mux" val="DSP"/>
-          <ctl name="DSP ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DAC L2 Mux" val="IF1 DAC"/>
-          <ctl name="DAC R2 Mux" val="IF1 DAC"/>
-          <ctl name="DA MONOL ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DA MONOR ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DAC2 Playback Volume" val="175"/>
-          <ctl name="Mono DAC MIXL DAC L2 Switch" val="1"/>
-          <ctl name="Mono DAC MIXR DAC L2 Switch" val="0"/>
-          <ctl name="Mono DAC MIXR DAC R2 Switch" val="1"/>
-
-          <ctl name="Mono ADC L1 Mux" val="Mono DAC MIXL"/>
-          <ctl name="Mono ADC R1 Mux" val="Mono DAC MIXR"/>
-          <ctl name="AD MONOL ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="AD MONOR ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="Mono ADC MIXL ADC1 Switch" val="1"/>
-          <ctl name="Mono ADC MIXR ADC1 Switch" val="1"/>
-          <ctl name="IF2 ADC Mux" val="IF_ADC2"/>
-
-          <ctl name="Left Spk Output Voltage" val="8.5V"/>
-
-          <ctl name="Right Spk Output Voltage" val="8.5V"/>
-
-          <ctl name="Left Spk Max Coil Current" val="1.9A"/>
-
-          <ctl name="Right Spk Max Coil Current" val="1.9A"/>
-
-          <ctl name="Left Spk Resistance" val="Auto"/>
-
-          <ctl name="Right Spk Resistance" val="Auto"/>
-
-          <ctl name="Left Spk Input Interface Mux" val="Input1"/>
-          <ctl name="Right Spk Input Interface Mux" val="Input1"/>
-          <ctl name="Left Spk Input Channel Mux" val="Left"/>
-          <ctl name="Right Spk Input Channel Mux" val="Right"/>
-          <ctl name="Left Spk Amplifier Channel Mux" val="DSP"/>
-
-          <ctl name="Right Spk Amplifier Channel Mux" val="DSP"/>
-
-          <ctl name="Left Spk Output Channel Mux" index="0" val="Gain"/>
-          <ctl name="Left Spk Output Channel Mux" index="1" val="AEC"/>
-          <ctl name="Right Spk Output Channel Mux" index="0" val="Current"/>
-          <ctl name="Right Spk Output Channel Mux" index="1" val="Gain"/>
-          <ctl name="Left Spk Output Interface Mux" val="DSP"/>
-          <ctl name="Right Spk Output Interface Mux" val="DSP"/>
-          <ctl name="Left Spk Gain Channel Mux" val="Right"/>
-          <ctl name="Right Spk Gain Channel Mux" val="Left"/>
-
-
-          <!-- <ctl name="Left Spk Preset File" val="tfa9890_left_music.preset"/> -->
-          <ctl name="Left Spk Preset File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x6c,0x65,0x66,0x74,0x5f,0x6d,0x75,0x73,0x69,0x63,0x2e,0x70,0x72,0x65,0x73,0x65,0x74"/>
-          <!-- <ctl name="Right Spk Preset File" val="tfa9890_right_music.preset"/> -->
-          <ctl name="Right Spk Preset File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x72,0x69,0x67,0x68,0x74,0x5f,0x6d,0x75,0x73,0x69,0x63,0x2e,0x70,0x72,0x65,0x73,0x65,0x74"/>
-          <!-- <ctl name="Left Spk Equalizer File" val="tfa9890_left_music.eq"/> -->
-          <ctl name="Left Spk Equalizer File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x6c,0x65,0x66,0x74,0x5f,0x6d,0x75,0x73,0x69,0x63,0x2e,0x65,0x71"/>
-          <!-- <ctl name="Right Spk Equalizer File" val="tfa9890_right_music.eq"/> -->
-          <ctl name="Right Spk Equalizer File" val="0x74,0x66,0x61,0x39,0x38,0x39,0x30,0x5f,0x72,0x69,0x67,0x68,0x74,0x5f,0x6d,0x75,0x73,0x69,0x63,0x2e,0x65,0x71"/>
-
-		</path>
-
-        <path name="on_pcm">
-			<ctl name="Int Left Spk Switch" val="1"/>
-            <ctl name="Int Right Spk Switch" val="1"/>
-		</path>
-        <path name="off_pcm">
-			<ctl name="Int Left Spk Switch" val="0"/>
-            <ctl name="Int Right Spk Switch" val="0"/>
-		</path>
-
-	</device>
-
-	<device name="headphone">
-
-        <path name="on">
-            			<!-- we do this when PCM output is routed to headphone-->
-          <ctl name="RxDP Mux" val="IF2 DAC"/>
-          <ctl name="RxDP SRC Switch" val="Divided by 3"/>
-          <ctl name="DSP DL Mux" val="DSP"/>
-          <ctl name="DSP ASRC Switch" val="clk_i2s1_track"/>
-          <ctl name="DAC L2 Mux" val="IF1 DAC"/>
-          <ctl name="DAC R2 Mux" val="IF1 DAC"/>
-          <ctl name="DA MONOL ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DA MONOR ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DAC2 Playback Volume" val="167"/>
-
-		</path>
-
-        <path name="on_pcm">
-            <ctl name="HPO MIX DAC1 Switch" val="1"/>
-            <ctl name="Stereo DAC MIXL DAC L2 Switch" val="1"/>
-            <ctl name="Stereo DAC MIXR DAC R2 Switch" val="1"/>
-			<ctl name="Headphone Jack Switch" val="1"/>
-		</path>
-        <path name="off_pcm">
-            <ctl name="Stereo DAC MIXL DAC L2 Switch" val="0"/>
-            <ctl name="Stereo DAC MIXR DAC R2 Switch" val="0"/>
-			<ctl name="Headphone Jack Switch" val="0"/>
-		</path>
-	</device>
-
-	<device name="headset">
-		<path name="on">
-          <ctl name="IF1 ADC Mux" val="IF1_ADC1"/>
-
-          <ctl name="RxDP Mux" val="IF2 DAC"/>
-          <ctl name="TxDP Capture Volume" val="108"/>
-          <ctl name="TxDP SRC Switch" val="Normal"/>
-
-          <ctl name="DSP ASRC Switch" val="clk_sysy_div_out"/>
-
-          <ctl name="TDM Data Mux" val="Slot 0-1"/>
-
-          <ctl name="DRC Pre Boost" val="14"/>
-          <ctl name="DRC Limiter Th" val="63"/>
-
-          <ctl name="AD STO1 ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="Stereo1 ADC1 Mux" val="ADC"/>
-          <ctl name="Stereo1 ADC Mux" val="ADC1L ADC2R"/>
-          <ctl name="ADC 1_2" val="ADC"/>
-
-		</path>
-        <path name="on_pcm">
-            <ctl name="HPO MIX DAC1 Switch" val="1"/>
-            <ctl name="Stereo DAC MIXL DAC L2 Switch" val="1"/>
-            <ctl name="Stereo DAC MIXR DAC R2 Switch" val="1"/>
-			<ctl name="Headphone Jack Switch" val="1"/>
-		</path>
-
-        <path name="off_pcm">
-            <ctl name="Headphone Jack Switch" val="0"/>
-            <ctl name="Stereo DAC MIXL DAC L2 Switch" val="0"/>
-            <ctl name="Stereo DAC MIXR DAC R2 Switch" val="0"/>
+            <ctl name="SPK MIXR DAC R1 Switch" val="1"/>
+            <ctl name="Speaker Playback Volume" val="0x20"/>
+            <ctl name="Int Spk Switch" val="1"/>
         </path>
+        <path name="off">
+            <ctl name="SPK MIXR DAC R1 Switch" val="1"/>
+            <ctl name="Int Spk Switch" val="0"/>
+        </path>
+    </device>
 
-	</device>
+    <!--
+      有线耳机（三段式插头，无麦克风）对应 AUDIO_DEVICE_OUT_WIRED_HEADPHONE
+      Headphone Jack Switch 同时负责耳机检测和输出切换，机器驱动里是同一个
+      DAPM 开关，所以这里只需要它。
+    -->
+    <device name="headphone">
+        <path name="on">
+            <ctl name="Headphone Jack Switch" val="1"/>
+            <ctl name="HP Playback Volume" val="0x1e"/>
+        </path>
+        <path name="off">
+            <ctl name="Headphone Jack Switch" val="0"/>
+        </path>
+    </device>
 
+    <!--
+      有线耳麦（四段式插头）对应 AUDIO_DEVICE_OUT_WIRED_HEADSET
+      输出侧和 headphone 完全一样（同一路 HPO），区别只在对端 mic 走 headset_in。
+      保留成两个 device 是因为 device_table[] 把它们映射到不同的 Android 设备位。
+    -->
+    <device name="headset">
+        <path name="on">
+            <ctl name="Headphone Jack Switch" val="1"/>
+            <ctl name="HP Playback Volume" val="0x1e"/>
+        </path>
+        <path name="off">
+            <ctl name="Headphone Jack Switch" val="0"/>
+        </path>
+    </device>
+
+    <!--
+      板载数字麦克风 对应 AUDIO_DEVICE_IN_BUILTIN_MIC
+        DMIC Switch      : 打开数字麦克风偏置
+        Stereo ADC L2/R2 : 立体声 ADC 的第二路输入选 DMIC1
+        ADC MIXL/R ADC2  : 让 ADC2（数字麦那一路）进混音器，ADC1 关掉
+        ADC Boost Gain   : 官方值 2
+        Int Mic Switch   : 板载麦克风使能，机器驱动的 DAPM 开关
+      顺序上先配 ADC 通路、最后才开 Int Mic Switch，避免录入爆音。
+    -->
+    <device name="mic">
+        <path name="on">
+            <ctl name="DMIC Switch" val="DMIC1"/>
+            <ctl name="Stereo ADC L2 Mux" val="DMIC1"/>
+            <ctl name="Stereo ADC R2 Mux" val="DMIC1"/>
+            <ctl name="Stereo ADC MIXL ADC1 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXR ADC1 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXL ADC2 Switch" val="1"/>
+            <ctl name="Stereo ADC MIXR ADC2 Switch" val="1"/>
+            <ctl name="ADC Boost Gain" val="2"/>
+            <ctl name="Int Mic Switch" val="1"/>
+        </path>
+        <path name="off">
+            <ctl name="Stereo ADC MIXL ADC2 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXR ADC2 Switch" val="0"/>
+            <ctl name="ADC Boost Gain" val="0"/>
+            <ctl name="Int Mic Switch" val="0"/>
+        </path>
+    </device>
+
+    <!--
+      耳机麦克风 对应 AUDIO_DEVICE_IN_WIRED_HEADSET
+        RECMIXL/R BST2 : 耳机麦接在 codec 的 IN2（第二组输入），走 boost2
+        Stereo ADC L1/R1 Mux = ADC : 用模拟 ADC1 那一路
+        ADC MIXL/R ADC1=1、ADC2=0 : 与板载数字麦互斥
+        IN2 Mode Control = Single ended : 耳机麦是单端接法，不是差分
+        IN2 Boost = 1 : 官方给耳机麦的值（板载麦那组是 5，别搞混）
+    -->
     <device name="headset_in">
-		<path name="on_pcm_rec">
-			<!-- we do this when PCM output is routed to headset-->
-            <ctl name="IF1 ADC1 IN2 Mux" val="IF1_ADC4"/>
-            <ctl name="DSP UL Mux" val="Bypass"/>
-            <ctl name="DSP Function Switch" val="HeadsetMic 48K-stereo+FFP+NS"/>
-            <ctl name="RECMIXL BST1 Switch" val="1"/>
-            <ctl name="RECMIXR BST1 Switch" val="1"/>
-            <ctl name="Sto1 ADC MIXL ADC1 Switch" val="1"/>
-            <ctl name="Sto1 ADC MIXR ADC1 Switch" val="1"/>
-            <ctl name="DRC Switch" val="Enable"/>
-			<ctl name="Mic Jack Switch" val="1"/>
-		</path>
-		<path name="off_pcm_rec">
-			<!-- we do this when PCM output is no longer routed to headset-->
+        <path name="on">
+            <ctl name="ADC Capture Switch" val="1"/>
             <ctl name="RECMIXL BST1 Switch" val="0"/>
             <ctl name="RECMIXR BST1 Switch" val="0"/>
-			<ctl name="Mic Jack Switch" val="0"/>
-		</path>
+            <ctl name="RECMIXL BST2 Switch" val="1"/>
+            <ctl name="RECMIXR BST2 Switch" val="1"/>
+            <ctl name="Stereo ADC L1 Mux" val="ADC"/>
+            <ctl name="Stereo ADC R1 Mux" val="ADC"/>
+            <ctl name="Stereo ADC MIXL ADC1 Switch" val="1"/>
+            <ctl name="Stereo ADC MIXR ADC1 Switch" val="1"/>
+            <ctl name="Stereo ADC MIXL ADC2 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXR ADC2 Switch" val="0"/>
+            <ctl name="IN2 Mode Control" val="Single ended"/>
+            <ctl name="IN2 Boost" val="1"/>
+            <ctl name="Mic Jack Switch" val="1"/>
+        </path>
+        <path name="off">
+            <ctl name="RECMIXL BST2 Switch" val="0"/>
+            <ctl name="RECMIXR BST2 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXL ADC1 Switch" val="0"/>
+            <ctl name="Stereo ADC MIXR ADC1 Switch" val="0"/>
+            <ctl name="Mic Jack Switch" val="0"/>
+        </path>
     </device>
 
-	<device name="mic">
-		<path name="on">
-        <ctl name="IF1 ADC Mux" val="IF1_ADC1"/>
-          <ctl name="IF1 ADC1 IN2 Mux" val="IF1_ADC4"/>
-          <ctl name="TxDP Capture Volume" val="108"/>
-          <ctl name="TxDP SRC Switch" val="Normal"/>
-          <ctl name="DSP Function Switch" val="BuiltinMic 48K-stereo+FFP+NS"/>
-          <ctl name="DSP ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="DSP UL Mux" val="DSP"/>
-          <ctl name="TDM Data Mux" val="Slot 0-1"/>
-
-          <ctl name="DRC Pre Boost" val="14"/>
-          <ctl name="DRC Limiter Th" val="63"/>
-
-          <ctl name="AD STO1 ASRC Switch" val="clk_sysy_div_out"/>
-          <ctl name="Stereo1 ADC1 Mux" val="ADC"/>
-          <ctl name="Stereo1 ADC Mux" val="ADC1L ADC2R"/>
-          <ctl name="ADC 1_2" val="ADC"/>
-          <ctl name="RECMIXL BST2 Switch" val="1"/>
-          <ctl name="RECMIXL BST4 Switch" val="0"/>
-          <ctl name="RECMIXR BST2 Switch" val="0"/>
-          <ctl name="RECMIXR BST4 Switch" val="1"/>
-		</path>
-        <path name="on_pcm_rec">
-
-            <ctl name="DRC Switch" val="Enable"/>
-            <ctl name="Sto1 ADC MIXL ADC1 Switch" val="1"/>
-            <ctl name="Sto1 ADC MIXR ADC1 Switch" val="1"/>
-			<ctl name="Int Mic Switch" val="1"/>
-		</path>
-        <path name="off_pcm_rec">
-			<ctl name="Int Mic Switch" val="0"/>
-		</path>
+    <!--
+      听筒 对应 AUDIO_DEVICE_OUT_EARPIECE
+      g100 是平板，物理上没有听筒，但 audio_policy.conf 的 attached_output_devices
+      和 primary output devices 里列了 EARPIECE（官方 ardbeg 的 policy 也这么写），
+      所以保留一份配置，免得路由到它时完全没动作。
+      实际效果是同一个内部扬声器、音量更低（0x11）、且断开 SPK MIXR。
+    -->
+    <device name="earpiece">
+        <path name="on">
+            <ctl name="SPK MIXR DAC R1 Switch" val="0"/>
+            <ctl name="Int Spk Switch" val="1"/>
+            <ctl name="Speaker Playback Volume" val="0x11"/>
+        </path>
+        <path name="off">
+            <ctl name="SPK MIXR DAC R1 Switch" val="1"/>
+            <ctl name="Int Spk Switch" val="0"/>
+        </path>
     </device>
 
-	<!-- Define PCM playback and capture streams @48kHz sample rate -->
-	<stream type="pcm" dir="out" card="1" device="0" rate="48000">
+    <!--
+      PCM 播放 / 录音流
+        card   : 同 mixer，写声卡名，运行时解析成序号
+        device : PCM 子设备号。tegra-snd-rt5639 上 I2S 到 codec 的 PCM 是 device 0
+        rate   : 官方 pcm_config 是 48000（codec 主时钟按 48k 配的）
+        period_size / period_count : 官方值 512 x 4，是 DMA 周期，照抄官方。
+                 若怀疑欠载（logcat 出现 underrun），可以删掉这两个属性，
+                 HAL 会退回默认的 256 x 4。
+      这里不写 enable/disable：tinyhal 要求被引用的 path 名必须已经在前面某个
+      device 里定义过（find_path_name 会校验），而本方案把所有开关都放进各
+      device 的 on/off 了，不需要额外的流级路径。
+    -->
+    <!--
+      【恢复 RT5639 主输出 2026-11-04】
+        旧版把主输出临时改接 HDMI card 0/device 3；这只能把声音送到 HDMI，
+        平板内置扬声器和耳机不会出声。原因是旧内核的 ARM LPAE 配置没有
+        Tegra 32-bit DMA zone，导致 tegra_pcm_new() 为 I2S 分配 coherent DMA
+        缓冲时以 -ENOMEM 失败，RT5639 声卡未注册。现在内核配置为 Tegra124
+        选择 ZONE_DMA，且 boot kernel 将包含 P1761/1470 的 RT5639 DTB；
+        所以主输出恢复到官方 RT5639 codec 的 card/device 0。
 
-		<!-- Custom path to apply in device entries when this
-		stream is routed to or unrouted from that device -->
-		<enable path="on_pcm"/>
-        <disable path="off_pcm"/>
-	</stream>
-
-	<stream type="pcm" dir="in" card="1" device="0" rate="48000">
-        <enable path="on_pcm_rec"/>
-        <disable path="off_pcm_rec"/>
-	</stream>
+        card 名来自 /proc/asound/cards 的 ASoC 声卡注册名；audio_config.c
+        会将其解析为动态 ALSA card index，避免假定它永远是 card 0 或 1。
+        扬声器/耳机 mixer 路由继续使用上方的 RT5639 控件定义。
+    -->
+    <stream type="pcm" dir="out" card="tegra-snd-rt5639" device="0"
+            rate="48000" period_size="512" period_count="4"/>
+    <stream type="pcm" dir="in"  card="tegra-snd-rt5639" device="0"
+            rate="48000" period_size="512" period_count="4"/>
 
 </audiohal>
-

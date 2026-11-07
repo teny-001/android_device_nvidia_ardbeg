@@ -1,0 +1,48 @@
+# ============================================================================
+# [CM14.1-on-ardbeg 修复 2026-11-06] zygote 注入 SELinux 旁路垫片
+#
+# 背景（完整推导见 device/nvidia/ardbeg/prebuilt/lib/libselinux_bypass.c 头部）：
+#
+#   本机沿用原厂 4.4.4 ramdisk 里的 /sepolicy，dmesg 实测只有
+#       1 users, 2 roles, 307 types, 84 classes, 3023 rules
+#   而 7.1 的 zygote fork 出 system_server 后要切到 u:r:system_server:s0，
+#   这个 type 在老策略里不存在 → security_check_context() 返回 -1/EINVAL →
+#       F/art: JNI FatalError called: com_android_internal_os_Zygote.cpp:631:
+#              selinux_android_setcontext failed
+#   system_server 立刻 SIGABRT，zygote 跟着退出，init 再拉起，无限循环。
+#   现象就是开机卡住、sys.boot_completed 永远为空，但 adb 是通的。
+#
+# 为什么 androidboot.selinux=permissive 没用：
+#   permissive 只影响"已判定 deny 的操作是否真的拦"，而这里是**决策过程本身
+#   出错**（type 查不到），压根走不到 permissive 分支。
+#
+# 为什么不能 selinux=0：
+#   内核配置里
+#       # CONFIG_SECURITY_SELINUX_BOOTPARAM is not set
+#       # CONFIG_SECURITY_SELINUX_DISABLE is not set
+#   所以既不能靠 cmdline 关，也不能运行时关。cmdline 里加 lsm=capability 也
+#   试过，这个 4.4 内核的 security_module_enable() 不认，策略照旧加载。
+#
+# 做法：
+#   用 LD_PRELOAD 把 libselinux_bypass.so 挂到 zygote 上，它覆盖了
+#   selinux_android_setcontext / selinux_android_setcon / is_selinux_enabled
+#   等符号，统一返回 0（=不切域）。fork 出的子进程继承同一份内存映射，
+#   所以 system_server 和所有 app 都不会再撞这个问题。
+#
+#   垫片库很小（5KB），只返回常量，不调用任何 libc 函数，加载开销可忽略。
+#
+# 长期正解：
+#   换自编内核（支持 policydb version 30）+ 7.1 完整 sepolicy 之后，
+#   删掉这一行和 /system/lib/libselinux_bypass.so 即可。
+# ============================================================================
+service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+    class main
+    socket zygote stream 660 root system
+    onrestart write /sys/android_power/request_state wake
+    onrestart write /sys/power/state on
+    onrestart restart audioserver
+    onrestart restart cameraserver
+    onrestart restart media
+    onrestart restart netd
+    writepid /dev/cpuset/foreground/tasks
+    setenv LD_PRELOAD /system/lib/libselinux_bypass.so

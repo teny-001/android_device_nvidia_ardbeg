@@ -1,0 +1,77 @@
+--- a/system/core/init/init.cpp
++++ b/system/core/init/init.cpp
+@@ -525,10 +525,29 @@
+                 security_failure();
+             }
+         }
+ 
++        // =====================================================================
++        // 【CM14.1 on ardbeg 移植修复 #2】checkreqprot 缺失不再致命
++        //
++        // 背景：/sys/fs/selinux/checkreqprot 是 Android 7.0 随 SELinux 策略
++        //   重构一起引入的 sysfs 开关，用于关闭 "checkreqprot" 这一历史兼容
++        //   行为。上游把它当成安全基线的一部分，写失败就 security_failure()。
++        //
++        // 本机情况：g100 用的是原厂 Android 4.4.4 的预编译内核
++        //   (Linux 3.10.24-g1fc624e)。其 SELinux 子系统是 4.4 时代的版本，
++        //   压根没有导出 checkreqprot 这个节点，write_file() 会因 ENOENT
++        //   直接返回 -1 —— 于是在 init 第二阶段刚起步就重启进 recovery。
++        //
++        // 处理：降级为告警。老内核没有这个开关意味着它本来就工作在
++        //   "checkreqprot=1" 的旧语义下，强行写 0 反而是新内核才需要的事，
++        //   跳过不会带来任何额外风险。等将来换成自带 7.1 配置的内核后，
++        //   这一处可以还原成上游写法。
++        // =====================================================================
+         if (write_file("/sys/fs/selinux/checkreqprot", "0") == -1) {
+-            security_failure();
++            ERROR("write /sys/fs/selinux/checkreqprot failed: %s "
++                  "(ignored on ardbeg: stock 3.10.24 kernel does not export it)\n",
++                  strerror(errno));
+         }
+ 
+         NOTICE("(Initializing SELinux %s took %.2fs.)\n",
+                is_enforcing ? "enforcing" : "non-enforcing", t.duration());
+@@ -616,11 +635,41 @@
+ 
+     // If we're in the kernel domain, re-exec init to transition to the init domain now
+     // that the SELinux policy has been loaded.
+     if (is_first_stage) {
++        // =====================================================================
++        // 【CM14.1 on ardbeg 移植修复 #1】restorecon("/init") 失败不再致命
++        //
++        // 背景：init 第一阶段在内核域跑完 selinux_initialize() 后，要给自己
++        //   (/init，位于 ramdisk 的 rootfs 上) 打上 init_exec 标签，然后
++        //   execv 自己进入第二阶段、切换到 init 域。打标签的动作是
++        //   setxattr("security.selinux", ...)，要求底层文件系统支持扩展属性。
++        //
++        // 本机情况：rootfs 是 ramdisk 解出来的 ramfs/tmpfs。原厂 4.4.4
++        //   预编译内核的配置里 `# CONFIG_TMPFS_XATTR is not set`（已用
++        //   device/nvidia/ardbeg/kernel-config/ardbeg_defconfig 核对过），
++        //   于是 setxattr 返回 EOPNOTSUPP，restorecon 必然返回 -1。
++        //
++        //   上游在这里直接 security_failure()：打印 "Security failure;
++        //   rebooting into recovery mode..." 后 android_reboot(recovery)，
++        //   然后 while(true) pause()。而本机 recovery 分区同样是 4.4.4 的
++        //   ramdisk，无法加载 7.1 的 /system，于是表现为：
++        //       刷入 7.1 boot → 无画面 → USB 反复枚举 → 永远没有 adb
++        //   这就是"设备没有启动"的真正原因。
++        //
++        //   注：cmdline 里的 androidboot.selinux=permissive 只能关掉 enforce，
++        //   不会让 selinux_initialized() 变 false，restorecon 依旧会真的去
++        //   setxattr，所以 permissive 救不了这个问题。
++        //
++        // 处理：降级为告警，继续 execv 进第二阶段。permissive 下不 enforce，
++        //   rootfs 上少量文件缺标签不影响启动（system 分区是 ext4，本身支持
++        //   xattr，标签正常）。已同步给内核开启 CONFIG_TMPFS_XATTR，
++        //   等换用自编内核后这一处可还原成上游写法。
++        // =====================================================================
+         if (restorecon("/init") == -1) {
+-            ERROR("restorecon failed: %s\n", strerror(errno));
+-            security_failure();
++            ERROR("restorecon(\"/init\") failed: %s "
++                  "(ignored on ardbeg: ramfs lacks TMPFS_XATTR)\n",
++                  strerror(errno));
+         }
+         char* path = argv[0];
+         char* args[] = { path, const_cast<char*>("--second-stage"), nullptr };
+         if (execv(path, args) == -1) {

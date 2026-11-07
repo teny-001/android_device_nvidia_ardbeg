@@ -7,7 +7,9 @@
 #is strictly prohibited.
 
 on init
-    setprop ro.serialno 0123456789ABCDEF
+    # 【修复 2026-11-04】这一行 setprop 永远不会生效，原因见下面 iSerial 处的说明。
+    # 保留它没有任何作用，但也不报错，为了不再误导后来的人，直接注释掉。
+    # setprop ro.serialno 0123456789ABCDEF
     setprop ro.product.manufacturer NVIDIA
     setprop ro.product.model Tegra-Android
     setprop ro.nv.usb.vid 0x0955
@@ -19,7 +21,39 @@ on init
     setprop ro.nv.usb.pid.ptp.adb 0x701f
 
 on boot
-    write /sys/class/android_usb/android0/iSerial ${ro.serialno}
+    # 【修复 2026-11-04】iSerial 改成直接写字面值，不再引用 ${ro.serialno}。
+    #
+    # 原来的写法：
+    #     write /sys/class/android_usb/android0/iSerial ${ro.serialno}
+    # 每次开机都会报：
+    #     init: cannot expand '${ro.serialno}' while writing to
+    #           '/sys/class/android_usb/android0/iSerial'
+    #
+    # 根因（已核对 CM11 源码，不是猜测）：
+    #   1) system/core/init/init.c 里 export_kernel_boot_props() 有一张 prop_map：
+    #          { "ro.boot.serialno", "ro.serialno", "", }
+    #      它会用 property_get("ro.boot.serialno") 取值，取不到就用**默认值 ""**
+    #      去 property_set("ro.serialno", "")。
+    #   2) 本机 /proc/cmdline 里没有 androidboot.serialno（只有
+    #      vpr_resize androidboot.selinux=... androidboot.hardware=ardbeg ...），
+    #      所以 ro.boot.serialno 为空 → ro.serialno 被置成空字符串。
+    #   3) export_kernel_boot_props 是 queue_builtin_action 挂在 init 触发器最前面的，
+    #      比本文件 "on init" 里的 setprop 更早执行。
+    #   4) system/core/init/property_service.c 明确规定
+    #          /* ro.* properties may NEVER be modified once set */
+    #          if(!strncmp(name, "ro.", 3)) return -1;
+    #      所以后面再 setprop ro.serialno 一定失败，而且**不打印任何错误**。
+    #      真机验证过：setprop ro.serialno TESTVAL 返回 0，但 getprop 仍然是空，
+    #      getprop | grep serialno 连这个 key 都没有值。
+    #
+    # 结论：这套 ROM 里 ro.serialno 恒为空，${ro.serialno} 必然展开失败。
+    #   直接把板级默认序列号写死进 iSerial，既消除报错，又让 USB 描述符里
+    #   有稳定的序列号（MTP 设备名、adb 序列号都靠它）。
+    #   注意：adb devices 显示的 0123456789ABCDEF 就是 adb 在设备没报序列号时
+    #   用的占位值，和这里写的值巧合相同，不要被误导。
+    #   如果以后 bootloader 的 cmdline 里带上了 androidboot.serialno，
+    #   ro.serialno 就会是真的序列号，那时应该改回 ${ro.serialno}。
+    write /sys/class/android_usb/android0/iSerial 0123456789ABCDEF
     write /sys/class/android_usb/android0/iManufacturer ${ro.product.manufacturer}
     write /sys/class/android_usb/android0/iProduct ${ro.product.model}
 
@@ -28,7 +62,11 @@ on boot
     write /sys/class/android_usb/android0/f_rndis/wceis 1
 
     # USB gadget
-    write /sys/class/android_usb/android0/enable 0
+    # [2026-11-06] 注释掉下面这行。这里 enable 0 会把 on init 已经配好并
+    # enable 1 的 adb gadget 断开，而原厂是依赖后面的 setprop sys.usb.config
+    # 再 enable 1 的。我们的流程里 on init 就配好了，这里再断开只会让
+    # 开机后 USB 静默失联几十秒，直到 boot_completed 的 usb_mtp_default 才恢复。
+    #write /sys/class/android_usb/android0/enable 0
 
 on post-fs
     mkdir /dev/usb-ffs 0770 shell shell
@@ -36,55 +74,100 @@ on post-fs
     mount functionfs adb /dev/usb-ffs/adb uid=2000,gid=2000
     write /sys/class/android_usb/android0/f_ffs/aliases adb
 
-on property:sys.usb.config=mtp
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.mtp}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/enable 1
-    setprop sys.usb.state ${sys.usb.config}
+# =============================================================================
+# [CM14.1-on-ardbeg 修改 2026-11-06] 以下 6 段原厂 USB 配置已全部注释
+#
+# 原因展开说明：
+#
+#   1) 加载顺序：这个文件由 init.tegra.rc 第 9 行 import，而 init.tegra.rc
+#      又是 init.rc 第 9 行 import 的；system/core/rootdir/init.usb.rc 在
+#      init.rc 第 8 行，**排在前面**。
+#      init 的 property 触发语义是「所有匹配的 action 都执行」，按 action
+#      的加载顺序依次跑 —— 也就是说原厂这 6 段**排在我们的后面、
+#      最后执行、最后覆盖**我们写的 18d1:4ee2。
+#
+#   2) 字段宽度 bug：原厂写的是
+#          write .../idVendor  ${ro.nv.usb.vid}         # 值 = 字符串 "0x0955"
+#          write .../idProduct ${ro.nv.usb.pid.mtp.adb} # 值 = 字符串 "0x701b"
+#      而内核的 DESCRIPTOR_ATTR(idVendor, "%04x\n")
+#      （kernel/nvidia/shield/drivers/usb/gadget/android.c:1712-1727）
+#      字段宽度是 4，sscanf("%04x") 最多只吃 4 个字符：
+#          0x0955 -> "0x09" -> 0x0009 -> 读回 "0009"
+#          0x701b -> "0x70" -> 0x0070 -> 读回 "0070"
+#      实测（未注释前，重启后）：
+#          cat idVendor  -> 0009
+#          cat idProduct -> 0070
+#          cat iProduct  -> Tegra-Android
+#      枚举出来是 0009:0070 —— 一个根本不存在的 Vendor ID。
+#      Windows 不会给它加载标准 MTP 驱动，设备管理器里显示成未知设备，
+#      用户看到的现象仍然是「插上没反应 / 没有盘符」。
+#
+#      注意这个 bug 只在**带 0x 前缀**时出现。直接写 "0955" 是正常的，
+#      这也是 init.usb.rc 那套写法能工作的原因。
+#
+#   3) 统一改用 system/core/rootdir/init.usb.rc 里那套 AOSP 标准 ID
+#      （18d1:4ee1 / 4ee2 / 4ee5 / 4ee6），Windows 10/11 自带 MTP 驱动，
+#      插上直接认成便携设备。补丁见
+#      patches/system/core/rootdir/init.usb.rc.patch
+#
+# 保留的是：
+#   * on boot 段的描述符字符串（iSerial / iManufacturer / iProduct）
+#     —— 这三项原厂写得没问题，而且 iSerial 已经改成字面值，不再引用
+#        那个永远不会生效的 ${ro.serialno}。
+#   * on post-fs 段的 functionfs 挂载（幂等，与 init.usb.rc 的 on init
+#     重复也无害）。
+#   * on init 段的 ro.nv.usb.* 属性 —— 虽然已经没人读它们了，但留着无害，
+#     万一将来要用原厂 PID 还能直接引用。
+#
+# 【怎么回滚】
+#   把下面 6 段前面的 '#' 去掉即可，同时把 on boot 里的 enable 0 也恢复。
+#   但要注意：一旦恢复，VID/PID 又会变回 0009:0070，MTP 会重新不可用。
+# =============================================================================
 
-on property:sys.usb.config=mtp,adb
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.mtp.adb}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/enable 1
-    start adbd
-    setprop sys.usb.state ${sys.usb.config}
-
-on property:sys.usb.config=rndis
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.rndis}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/bDeviceClass 224
-    write /sys/class/android_usb/android0/enable 1
-    setprop sys.usb.state ${sys.usb.config}
-
-on property:sys.usb.config=rndis,adb
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.rndis.adb}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/bDeviceClass 0
-    write /sys/class/android_usb/android0/enable 1
-    start adbd
-    setprop sys.usb.state ${sys.usb.config}
-
-on property:sys.usb.config=ptp
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.ptp}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/enable 1
-    setprop sys.usb.state ${sys.usb.config}
-
-on property:sys.usb.config=ptp,adb
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
-    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.ptp.adb}
-    write /sys/class/android_usb/android0/functions ${sys.usb.config}
-    write /sys/class/android_usb/android0/enable 1
-    start adbd
-    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=mtp
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.mtp}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/enable 1
+#    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=mtp,adb
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.mtp.adb}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/enable 1
+#    start adbd
+#    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=rndis
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.rndis}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/bDeviceClass 224
+#    write /sys/class/android_usb/android0/enable 1
+#    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=rndis,adb
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.rndis.adb}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/bDeviceClass 0
+#    write /sys/class/android_usb/android0/enable 1
+#    start adbd
+#    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=ptp
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.ptp}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/enable 1
+#    setprop sys.usb.state ${sys.usb.config}
+#on property:sys.usb.config=ptp,adb
+#    write /sys/class/android_usb/android0/enable 0
+#    write /sys/class/android_usb/android0/idVendor ${ro.nv.usb.vid}
+#    write /sys/class/android_usb/android0/idProduct ${ro.nv.usb.pid.ptp.adb}
+#    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+#    write /sys/class/android_usb/android0/enable 1
+#    start adbd
+#    setprop sys.usb.state ${sys.usb.config}

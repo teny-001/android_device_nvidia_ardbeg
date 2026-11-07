@@ -1,0 +1,32 @@
+--- a/external/chromium_org/GypAndroid.linux-arm.mk
++++ b/external/chromium_org/GypAndroid.linux-arm.mk
+@@ -227,7 +227,28 @@
+ include $(LOCAL_PATH)/url/url_lib.target.linux-arm.mk
+ include $(LOCAL_PATH)/v8/tools/gyp/generate_trig_table.host.linux-arm.mk
+ include $(LOCAL_PATH)/v8/tools/gyp/js2c.host.linux-arm.mk
+-include $(LOCAL_PATH)/v8/tools/gyp/mksnapshot.arm.host.linux-arm.mk
++# [修改 2026-10-28] 64 位宿主上跳过 mksnapshot 模块
++#
++# mksnapshot.arm.host.linux-arm.mk 是个**宿主可执行文件**，但它的 MY_CFLAGS_*
++# 里硬编码了 -m32（因为 V8 的 ARM 模拟器只支持 ia32/arm 宿主，快照必须由
++# 32 位进程生成）。本机没有任何 32 位运行时，编出来的 .o 是 ELFCLASS32/i386，
++# 用 64 位 ld 链接时报：
++#     ld: error: .../v8/src/mksnapshot.o: incompatible target
++#     crt1.o(.text+0x20): error: undefined reference to 'main'
++#     make: *** [.../mksnapshot.arm] Error 1
++#
++# 全树只有 v8_snapshot.target.linux-arm.mk 会依赖它（grep 确认过），
++# 而那边已经改成直接用 v8/src/snapshot-empty.cc 当快照，
++# 所以这里不再 include 这个模块，它就不会被 host_modules_to_install 拉起来编。
++#
++# 同理，v8_base.arm.host / v8_nosnapshot.arm.host / third_party/icu 的
++# 三个 .host 静态库也带 -m32，但它们只是 mksnapshot 的依赖，
++# 没了 mksnapshot 就没人要，不会被编。
++ifeq ($(BUILD_HOST_64bit),1)
++  # 跳过 mksnapshot.arm.host.linux-arm.mk
++else
++  include $(LOCAL_PATH)/v8/tools/gyp/mksnapshot.arm.host.linux-arm.mk
++endif
+ include $(LOCAL_PATH)/v8/tools/gyp/v8.target.linux-arm.mk
+ include $(LOCAL_PATH)/v8/tools/gyp/v8_base.arm.host.linux-arm.mk
+ include $(LOCAL_PATH)/v8/tools/gyp/v8_base.arm.target.linux-arm.mk

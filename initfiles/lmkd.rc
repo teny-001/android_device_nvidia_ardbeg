@@ -1,0 +1,145 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 修复 2026-11-06 深夜]
+# lmkd 起不来 -> AMS 持大锁 sleep -> Watchdog 杀 system_server
+#              -> framework 整体重启 / 开机后突然黑屏
+#
+# -----------------------------------------------------------------------------
+# 【症状】
+# -----------------------------------------------------------------------------
+# 开机约 2 分钟后 /data/anr/traces_SystemServer_WDT*.txt 出现，
+# system_server 被 Watchdog 杀掉，Netd / zygote 跟着重启，
+# 表现为「用着用着突然黑屏、桌面重新加载」，此前一直被当成
+# 「KeyguardScrim 残留」或「EGL 崩了」的同类遗留问题，其实不是一回事。
+#
+# -----------------------------------------------------------------------------
+# 【现场】traces_SystemServer_WDT06_11月_22_31_58.632.txt
+# -----------------------------------------------------------------------------
+# 第一次 dump（第 2594 行起）：
+#     "Binder:1466_6" prio=5 tid=80 Sleeping
+#       at java.lang.Thread.sleep!(Native method)
+#       at com.android.server.am.ProcessList.writeLmkd(ProcessList.java:723)
+#       at com.android.server.am.ProcessList.setOomAdj(ProcessList.java:683)
+#       at ...ActivityManagerService.applyOomAdjLocked(...)
+#       at ...ActivityManagerService.attachApplication(...)
+#       - locked <0x0eb155e3> (a com.android.server.am.ActivityManagerService)
+#
+#     "main"                 tid=1  Blocked
+#     "android.display"      tid=18 Blocked
+#     "android.ui"           tid=12 Blocked
+#     "ActivityManager"      tid=11 Blocked
+#       全部: - waiting to lock <0x0eb155e3> ... held by thread 80
+#
+# 第二次 dump（第 3398 行起）换成 tid=11 持锁，同样卡在 writeLmkd，
+# 只是调用路径变成 remove() <- handleAppDiedLocked() <-
+# processContentProviderPublishTimedOutLocked()。
+# 也就是说这不是偶发死锁，而是「只要 socket 连不上就会稳定复现」。
+#
+# -----------------------------------------------------------------------------
+# 【根因】
+# -----------------------------------------------------------------------------
+# frameworks/base/services/core/java/com/android/server/am/ProcessList.java:
+#
+#     private static void writeLmkd(ByteBuffer buf) {
+#         for (int i = 0; i < 3; i++) {
+#             if (sLmkdSocket == null) {
+#                 if (openLmkdSocket() == false) {
+#                     Thread.sleep(1000);          // ← 持着 AMS 大锁睡 1 秒
+#                     continue;
+#                 }
+#             }
+#             ...
+#         }
+#     }
+#
+# openLmkdSocket() 连的是 /dev/socket/lmkd。本机这个 socket 根本不存在，
+# 于是每一次 setOomAdj() / remove() 都要在 **AMS 大锁里** 睡满 3 秒。
+# 开机阶段 app 频繁 attach / die / content provider timeout，这些调用
+# 排着队来，累计阻塞轻松超过 Watchdog 的 30s 首次 dump + 30s 判死窗口。
+# Watchdog 打印的 `nativePollOnce` 只是第二次检查时的「事后」状态，
+# 真正的现场只在 traces 文件里（这个陷阱 README 里已经记过一次）。
+#
+# -----------------------------------------------------------------------------
+# 【为什么 /dev/socket/lmkd 不存在 —— dmesg 实锤】
+# -----------------------------------------------------------------------------
+#     init: (Parsing /system/etc/init/lmkd.rc took 0.00s.)
+#     SELinux: Context u:object_r:lmkd_exec:s0 is not valid (left unmapped).
+#
+# rc **确实被 7.1 init 解析了**（不是目录没扫描、不是文件名问题），
+# 但 7.1 的 lmkd_exec 域在原厂 4.4.4 的 /sepolicy 里不存在
+# （那份 policy 只有 307 types / 84 classes / policyvers 28）。
+# init 在启动服务前做 security_compute_create() 就失败，连 execve 都没走到，
+# 所以 `getprop init.svc.lmkd` 是空的、/dev/socket/lmkd 也没被创建。
+#
+# 这和本项目 audioserver / cameraserver / mediacodec / mediaextractor
+# 的「7.1 新 SELinux 域不存在」是**同一条根因链**，修法也照抄：
+# 显式 seclabel 到一个 4.4.4 policy 里存在的域，绕开 init 的计算。
+#
+# -----------------------------------------------------------------------------
+# 【纠正 README 早前的一处误判】
+# -----------------------------------------------------------------------------
+# 旧笔记写「手动跑 /system/bin/lmkd 立刻退出，所以内核不支持 lmkd」，
+# 这个结论是错的。手工运行没有 init 为服务注入的 ANDROID_SOCKET_lmkd fd，
+# system/core/lmkd/lmkd.c 的 init() 里
+#     ctrl_lfd = android_get_control_socket("lmkd");
+#     if (ctrl_lfd < 0) { ALOGE(...); return -1; }
+# 必然返回 -1 -> main() 里 `if (!init()) mainloop();` 不成立 -> 直接退出。
+# 这只能说明「没在 init 服务环境里」，不能说明二进制或内核有问题。
+#
+# 实际上本机运行 lmkd 的条件是全的：
+#     /dev/memcg/                                     完整（含 memory.pressure_level）
+#     /sys/module/lowmemorykiller/parameters/minfree 存在且 root 可写，
+#         内容 1536,2048,4096,16384
+# 于是 use_inkernel_interface = 1，init() 连 init_mp() 都不会进，
+# 走的是最老、最稳的内核态 lowmemorykiller 接口。
+#
+# -----------------------------------------------------------------------------
+# 【相对 AOSP 原版的三处改动】
+# -----------------------------------------------------------------------------
+# 1) 加 seclabel u:r:mediaserver:s0
+#    设备树里另外 4 个 7.1 新服务（audioserver / cameraserver /
+#    mediacodec / mediaextractor）已经用它并实机验证 running。
+#    本机 SELinux 为 permissive（cmdline androidboot.selinux=permissive），
+#    域本身不会 enforce，关键是 context 字符串必须在 policy 里有效。
+#
+# 2) 去掉 group root readproc 里的 readproc
+#    7.1 bionic 的 android_ids 里没有 readproc，本机 /system/etc/group
+#    也不存在，decode_uid("readproc") 会得到无效 gid，
+#    setgroups() 带无效 gid 会让服务启动失败。保留 group root 即可。
+#
+# 3) 去掉 critical
+#    critical 服务反复崩溃会触发 init 直接 reboot，而本机 recovery 是
+#    4.4.4 的 ramdisk，一旦进去就再也加载不了 7.1 的 /system，
+#    等于变砖。lmkd 挂掉最多影响 OOM 调节，不该让整机重启。
+#
+# 另加 user root（AOSP 原版靠默认值，显式写出便于核对）。
+# socket / writepid 两项保持原样：/dev/cpuset/system-background/tasks
+# 在本机确实存在，其它 core 服务的 socket 也都用不带 socketcon 的写法。
+#
+# -----------------------------------------------------------------------------
+# 【为什么不改 ProcessList.java 去掉 sleep】
+# -----------------------------------------------------------------------------
+# 那是 AOSP 的设计（socket 短暂不可用时退避重试），改它要重编
+# services.jar；本机 out/ 已清空、所有 ROM 都走「解 system.img ->
+# 只换改动文件 -> 重新打包签名」的文件级重打包，改 Java 落不了地，
+# 只会再制造一个「check.sh 全绿但产物没进 ROM」的假修复
+# （egl_display.cpp.patch 已经踩过一次这个坑）。
+# 把 lmkd 服务修好之后 socket 一直连通，sleep 分支根本不会进，
+# 所以治本点在 rc，不在 framework Java。
+#
+# -----------------------------------------------------------------------------
+# 【验证口径】
+# -----------------------------------------------------------------------------
+#   getprop init.svc.lmkd          -> running
+#   ls -l /dev/socket/lmkd         -> srw-rw---- system system
+#   logcat 不再出现 "lowmemorykiller daemon socket open failed"
+#   连续观察 ≥10 分钟无新增 traces_SystemServer_WDT*.txt
+#   pidof system_server 全程不变
+# =============================================================================
+
+service lmkd /system/bin/lmkd
+    class core
+    user root
+    group root
+    seclabel u:r:mediaserver:s0
+    socket lmkd seqpacket 0660 system system
+    writepid /dev/cpuset/system-background/tasks

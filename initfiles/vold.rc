@@ -1,0 +1,88 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 修改 2026-11-06] vold 服务定义
+#
+# 相对 AOSP 7.1 原版（system/vold/vold.rc）只多了一行：
+#
+#     setenv LD_PRELOAD /system/lib/libselinux_bypass.so
+#
+# 【为什么要加这一行】
+#
+# system/vold/Utils.cpp 的 ForkExecvp() 是这么写的：
+#
+#     if (setexeccon(context)) {
+#         LOG(ERROR) << "Failed to setexeccon";
+#         abort();                       // <-- 直接自杀
+#     }
+#     status_t res = android_fork_execvp(argc, argv, NULL, false, true);
+#     if (setexeccon(nullptr)) {
+#         LOG(ERROR) << "Failed to setexeccon";
+#         abort();
+#     }
+#
+# 本机 SELinux 策略是原厂 4.4.4 的（307 个 type），vold 想要的
+# u:r:blkid:s0 / u:r:fsck:s0 这些域都在，但 setexeccon() 依然会失败 ——
+# 因为 7.1 的 libselinux 在策略加载后走的是完整的
+# security_check_context() -> security_compute_av() 路径，而老策略的
+# class 表里缺 7.1 需要的一批 class（service_manager 等），
+# 决策过程本身出错返回 -1。
+#
+# vold 每次要调 blkid / sgdisk / fsck_msdos / fsck.exfat 都会走
+# ForkExecvp，于是每次调外部工具都 SIGABRT 一次，init 再把 vold 拉起来，
+# vold 起来后又自杀 —— 无限循环。
+#
+# 实测症状（没挂垫片时）：
+#     logcat: E vold: Failed to setexeccon
+#             F libc: Fatal signal 6 (SIGABRT), code -6 in tid xxx (vold)
+#     tombstone: #04 abort+4  #05 pc /system/bin/vold
+#     dmesg: init: Service 'vold' (pid 165) killed by signal 6   ← 每 1~3 分钟一次
+#     dumpsys mount: VolumeInfo{public:8_1} state=CHECKING   （永远卡住）
+#     后果：/data/user_de/0/ 建不出来（7.1 的 device-encrypted 存储），
+#           SettingsProvider 的 settings.db 打不开；U 盘 / SD 卡也全挂不上。
+#     dmesg 里 USB、SCSI、vfat 全部正常，极易误判成"驱动问题"。
+#
+# 【为什么只挂 libselinux_bypass.so，不再挂 libsetexeccon_shim.so】
+#
+# libselinux_bypass.so 已经导出了 setexeccon()（返回 0），功能覆盖了
+# libsetexeccon_shim.so，不需要两个。
+#
+# 【★ 踩坑：setenv 只能有一个值，多了整行被丢弃 ★】
+#
+# 这里最初写的是：
+#     setenv LD_PRELOAD /system/lib/libselinux_bypass.so /system/lib/libsetexeccon_shim.so
+#
+# 结果是 vold 一直崩，查 /proc/<vold>/maps 发现根本没加载任何垫片，
+# /proc/<vold>/environ 里也没有 LD_PRELOAD。
+#
+# 根因在 system/core/init/service.cpp:294：
+#
+#     {"setenv",      {2,     2,    &Service::HandleSetenv}},
+#
+# 中间两个数字是**参数个数的最小值和最大值**（不含 keyword 本身），
+# 这里都是 2，也就是 `setenv NAME VALUE` 恰好 3 个 token。
+# 写了 4 个 token 之后 Service::HandleLine() 里
+# handler_map.FindFunction() 找不到匹配，报
+#     init: /system/etc/init/vold.rc: invalid option 'setenv'
+# 然后**整行被丢掉**，而且只在这一条上告警，不会让整个 service 定义失效 ——
+# 所以 socket / class / ioprio 全都正常，唯独 setenv 静默失效，极难发现。
+#
+# 结论：**一行 setenv 只能设一个变量、一个值**。
+# 要设多个 .so 就得用 LD_PRELOAD 以外的办法（或者合成一个 .so）。
+#
+# 【这只是权宜之计】
+#   真正的正解是改源码，把 abort() 降级成 WARNING，见
+#       device/nvidia/ardbeg/patches/system/vold/Utils.cpp.patch
+#   那个补丁已经打进源码树（patches/check.sh 显示"已应用"），
+#   但它只对**重新编译出来的 vold** 生效；文件级重打包的包里
+#   /system/bin/vold 还是原版二进制，所以必须靠这里的垫片兜住。
+#   下次全量编译之后，本文件的 setenv 那一行可以删掉。
+# =============================================================================
+
+service vold /system/bin/vold \
+        --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \
+        --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0
+    class core
+    socket vold stream 0660 root mount
+    socket cryptd stream 0660 root mount
+    setenv LD_PRELOAD /system/lib/libselinux_bypass.so
+    ioprio be 2
+    writepid /dev/cpuset/foreground/tasks

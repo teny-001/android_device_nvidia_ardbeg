@@ -1,0 +1,39 @@
+# =============================================================================
+# [CM14.1-on-ardbeg 修改 2026-11-06] mediaextractor 服务定义
+#
+# 相对 AOSP 7.1 原版（frameworks/av/media/libstagefright/mediaextractor.rc）
+# 只多了一行：
+#
+#     seclabel u:r:mediaserver:s0
+#
+# 【为什么要加】
+#
+# 和 mediacodec.rc 完全同一个根因，详细推导见那个文件的注释。简单说：
+# 原版没有 seclabel，init 在 Service::Start() 里调
+# security_compute_create() 自动算域，而原厂 4.4.4 的 /sepolicy 里
+# **没有 mediaextractor 这个域**（4.4.4 时代容器解析在 mediaserver 里），
+# 返回 -1 之后 service.cpp:385 直接 `return false`，服务一次都不启动：
+#
+#     dmesg: init: could not get context while starting 'mediaextractor'
+#
+# 后果：MediaExtractor 的 binder 服务端不存在，所有媒体容器解析
+# （mp4/mkv/avi 的音视频轨、字幕轨）全部失败，播放器打不开文件。
+#
+# 【为什么借用 mediaserver 域】
+# 原厂 4.4.4 策略里有 mediaserver 域（实测 /system/bin/mediaserver 正常起、
+# dmesg 无 deny），而 mediaextractor 本来就需要 media 的权限
+# （读 /data/media、访问 gralloc、拿 codec 服务）。
+#
+# 【注意 user 名】
+# 原版写的是 `user mediaex`（被截断的 "mediaextractor"，AOSP 上游就这么写的，
+# 而且 /system/etc/passwd 里确实有 mediaex 这个账号），不要"修正"成
+# mediaextractor —— 那样反而会因为账号不存在导致 setuid 失败。
+# =============================================================================
+
+service mediaextractor /system/bin/mediaextractor
+    class main
+    user mediaex
+    group drmrpc mediadrm
+    ioprio rt 4
+    writepid /dev/cpuset/foreground/tasks
+    seclabel u:r:mediaserver:s0

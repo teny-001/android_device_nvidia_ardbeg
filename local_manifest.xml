@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cm-14.1 local manifest for ardbeg (NVIDIA Tegra K1 T124 / TN8 P1761).
+
+  【为什么 device 仓库映射到 device/nvidia/ardbeg 而不是 device/nvidia】
+    Android 的 device 仓库惯例是「仓库根 = device/<vendor>/<device>/」。
+    本次移植虽然还合并了 ardbeg_tv 与 shield-common 两个兄弟树，但它们是
+    以 merged/ 快照形式随仓库分发的，由 install-layout.sh 展开，不是仓库根
+    下的并列目录。这样 clone 下来就能直接 lunch，也不会和 LineageOS 官方
+    manifest 里的 device/nvidia/* 项目产生 path 嵌套冲突（repo 不允许一个
+    project 的 path 是另一个 project 的父目录）。
+
+  【内核仓库不在此列】
+    android_kernel_nvidia_ardbeg 保持 4.4 时代分支不动：本 ROM 使用
+    device/nvidia/ardbeg/prebuilt/kernel（原厂 3.10.24 zImage），
+    TARGET_KERNEL_SOURCE 故意指向不存在的 kernel/nvidia/ardbeg__prebuilt_only，
+    不会走源码编译。详见 DEPENDENCIES.md 第 2 节。
+
+  【使用前的两步】
+    1) repo sync 完成后：
+         cd device/nvidia/ardbeg && ./install-layout.sh
+       把 merged/ardbeg_tv 与 merged/shield-common 展开到 device/nvidia/。
+    2) 打 AOSP 补丁：
+         cd device/nvidia/ardbeg/patches && ./check.sh && ./install.sh
+       不打补丁能编译但开不了机。
+
+  【冲突处理】
+    若本地 manifest 已经声明了同名 project（例如 cm-11 分支的旧 ardbeg），
+    请在本文件前面加 <remove-project name="..."/>，或改用
+    `git clone -b cm-14.1 <url> device/nvidia/ardbeg` 手工放置。
+-->
+<manifest>
+  <remote name="teny001"
+          fetch="https://github.com/teny-001/"
+          revision="cm-14.1"
+          review="github.com" />
+
+  <project name="android_device_nvidia_ardbeg"
+           path="device/nvidia/ardbeg"
+           remote="teny001"
+           revision="cm-14.1" />
+
+  <project name="android_vendor_nvidia_ardbeg"
+           path="vendor/nvidia/ardbeg"
+           remote="teny001"
+           revision="cm-14.1" />
+</manifest>

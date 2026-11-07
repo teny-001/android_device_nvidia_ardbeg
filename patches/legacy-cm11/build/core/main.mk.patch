@@ -1,0 +1,44 @@
+--- a/build/core/main.mk
++++ b/build/core/main.mk
+@@ -495,6 +495,41 @@
+ subdir_makefiles := \
+ 	$(shell build/tools/findleaves.py --prune=$(OUT_DIR) --prune=.repo --prune=.git $(subdirs) Android.mk)
+ 
++# ============================================================================
++# [修改 2026-10-28] 排除 sdk/ 子树，修复 ardbeg 编译中断：
++#
++#   make: *** No rule to make target
++#       `out/host/linux-x86/framework/org-netbeans-api-visual.jar',
++#       needed by `.../hierarchyviewer_intermediates/javalib.jar'.  Stop.
++#
++# 原因链条：
++#   1) sdk/hierarchyviewer/src/Android.mk 里
++#          LOCAL_MODULE_TAGS := debug
++#          LOCAL_JAVA_LIBRARIES := ddmlib-prebuilt org-openide-util \
++#                                  org-netbeans-api-visual
++#   2) build/core/main.mk 里 eng 变体的 tags_to_install 是
++#          tags_to_install := debug eng          （见本文件 355 行）
++#      所以带 debug 标签的 hierarchyviewer 会被默认目标（droid）拉进来编译。
++#   3) 但 org-openide-util / org-netbeans-api-visual 这两个 jar 是 Android SDK
++#      里 NetBeans OpenIDE 的产物，AOSP/LineageOS 源码树从来没有收录过；
++#      prebuilts/sdk/tools/lib/ 下只有 dx.jar、shrinkedAndroid.jar、signapk.jar。
++#      于是 make 找不到生成这两个 jar 的规则，直接 Stop。
++#
++# 为什么可以直接排除整个 sdk/：
++#   sdk/ 下面是 SDK 宿主机开发工具（hierarchyviewer、ddms、eventanalyzer、
++#   dumpeventlog、monitor、avdlauncher、sdklauncher、emulator、adtproductbuild…），
++#   全部是 LOCAL_IS_HOST_MODULE 的 Java/可执行工具，产物落在 out/host/ 下，
++#   不会进 system.img / boot.img，和设备 ROM 没有任何关系。
++#   设备侧需要的 aapt/aidl/dx/signapk 来自 prebuilts/sdk/tools 和 build/，
++#   不依赖 sdk/ 子树。
++#
++# 注意用的是 filter-out 而不是 findleaves 的 --prune=sdk：
++#   --prune 是按目录名匹配的，会把任何深度上叫 sdk 的目录都剪掉
++#   （比如 external/ 下某些叫 sdk 的子目录），风险太大。
++#   filter-out 只精确剔除 $(TOP)/sdk/ 开头的条目。
++# ============================================================================
++subdir_makefiles := $(filter-out $(TOP)/sdk/%,$(subdir_makefiles))
++
+ $(foreach mk, $(subdir_makefiles), $(eval include $(mk)))
+ 
+ endif # dont_bother

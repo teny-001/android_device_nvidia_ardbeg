@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+================================================================================
+  SettingsProvider 默认值 overlay
+    1) 预置默认输入法
+    2) WiFi / 蓝牙 开机默认开启（2026-11-06 新增）
+================================================================================
+
+【为什么需要这个 overlay】
+
+  设备树里装了三套输入法（见 device.mk 第二十一节）：
+      com.baidu.input_baidutv/.ImeService   原厂百度输入法，中文主力
+      com.android.inputmethod.latin/.LatinIME    AOSP 英文 + 多语言词典
+      com.ardbeg.ime/.ArdbegIME             手搓兜底键盘（纯 ASCII）
+
+  但是"装进 /system 的 IME"和"系统当前用的 IME"是两件事。
+  Settings.Secure.DEFAULT_INPUT_METHOD / ENABLED_INPUT_METHODS 这两个设置
+  项在全新刷机（settings 数据库刚建）时是空的，要靠
+  InputMethodManagerService 自己挑一个，或者等用户在
+  「设置 → 语言和输入法」里手动选。
+
+  本机是 Android TV 形态，没有触摸屏（Raydium 触摸驱动还没补），
+  只能靠 USB 鼠标或遥控器操作。如果开机后系统没自动选定输入法，
+  用户会遇到"点了输入框没键盘"的现象，而且很难自己找回来。
+
+  所以这里在 SettingsProvider 的默认值里直接写死，保证一次刷机就有
+  可用输入法，不用任何手工操作。
+
+【生效时机】
+
+  只有 settings 数据库**首次创建**时才会读这两个默认值，见
+  frameworks/base/packages/SettingsProvider/src/com/android/providers/settings/SettingsProvider.java
+  第 2475 到 2492 行（在 database version 升到 122 的那段里）：
+
+      defaultComponent = getContext().getResources().getString(R.string.def_input_method);
+      if (!TextUtils.isEmpty(defaultComponent)) {
+          secureSettings.insertSettingLocked(
+                  Settings.Secure.DEFAULT_INPUT_METHOD, defaultComponent, ...);
+      }
+
+      defaultComponent = getContext().getResources().getString(R.string.def_enable_input_methods);
+      if (!TextUtils.isEmpty(defaultComponent)) {
+          secureSettings.insertSettingLocked(
+                  Settings.Secure.ENABLED_INPUT_METHODS, defaultComponent, ...);
+      }
+
+  也就是说：
+    - 全新刷机（data 分区是空的）  生效
+    - 已经开过机的机器上改这里    不生效，要用
+        adb shell settings put secure default_input_method com.baidu.input_baidutv/.ImeService
+      手工设
+
+【两个字段的格式】
+
+  def_input_method
+      单个组件名，格式 <包名>/<服务类>。
+      用 "." 开头表示相对于包名的短写法也可以，这里写成完整写法更清楚。
+
+  def_enable_input_methods
+      ENABLED_INPUT_METHODS 是一个用冒号 ":" 分隔的组件名列表。
+      这里三个都列上，是因为：
+        - 百度那个是加固包，万一哪天因为系统改动又崩了，
+          用户还能在设置里切到另外两个，不至于完全没法输入；
+        - LatinIME 只有英文，但带多语言词典 overlay，英文联想/纠错比
+          ArdbegIME 强；
+        - ArdbegIME 是唯一不依赖任何编译产物的，最后兜底。
+
+      如果只想启用百度一个，把后面两段连同冒号删掉即可。
+
+【注意 XML 注释的格式限制】
+
+  本文件的注释里**不能出现两个连续的短横线**，那是 XML 规范禁止的
+  （注释不能包含两个连着的减号），一旦出现整个文件解析失败，PackageManager
+  只在 logcat 打一条 SystemConfig 的 warning 就静默跳过，
+  表现为"所有默认值都不生效"，极难排查。
+  所以下面所有分隔线一律用等号，不用短横线。
+================================================================================
+-->
+<resources>
+
+    <!-- 默认输入法：原厂百度输入法（中文拼音 / 拼音九键 / 笔画键盘） -->
+    <string name="def_input_method" translatable="false">com.baidu.input_baidutv/.ImeService</string>
+
+    <!-- 预启用的输入法列表，冒号分隔，顺序即优先级 -->
+    <string name="def_enable_input_methods" translatable="false">com.baidu.input_baidutv/.ImeService:com.android.inputmethod.latin/.LatinIME:com.ardbeg.ime/.ArdbegIME</string>
+
+    <!-- ====================================================================
+         【2026-11-06 新增】WiFi / 蓝牙 开机默认开启
+
+         【为什么必须在这里写，而不能只在运行时 settings put】
+
+         SettingsProvider 在 settings 数据库**首次创建**时, 由
+         DatabaseHelper.java 的 loadBooleanSetting() 把这两个默认值写进
+         Settings.Global：
+
+             2622: loadBooleanSetting(stmt, Settings.Global.WIFI_ON,
+                                      R.bool.def_wifi_on);
+             2628: loadBooleanSetting(stmt, Settings.Global.BLUETOOTH_ON,
+                                      R.bool.def_bluetooth_on);
+
+         蓝牙尤其关键。frameworks/base/services/core/java/com/android/server/
+         BluetoothManagerService.java 的构造函数只在这**一次**读：
+
+             if (isBluetoothPersistedStateOn()) {
+                 mEnableExternal = true;
+             }
+
+         isBluetoothPersistedStateOn() 读的就是 Settings.Global.BLUETOOTH_ON。
+         它注册的 ContentObserver 只监听 BLE_SCAN_ALWAYS_AVAILABLE，
+         **不监听 BLUETOOTH_ON**。也就是说开机之后再用
+             settings put global bluetooth_on 1
+         只影响下一次开机，当前这次 system_server 已经构造完了，蓝牙不会
+         自己亮。四清之后 settings.db 是全新的，AOSP 默认
+         def_bluetooth_on=false，于是蓝牙永远是 OFF。
+
+         WiFi 同理。虽然 vendor/cm/overlay/common 里已经写了
+         def_wifi_on=true，但 CM common overlay 是否被选中取决于产品继承链，
+         而 device/nvidia/shield-common/overlay/tv 那份
+         （同时带 def_wifi_on / def_bluetooth_on=true）只对 shield 生效，
+         ardbeg 并没有继承它。这里显式写两条，避免依赖外部 overlay。
+
+         【生效时机：全量编译路径】
+
+         这个 XML 会被 aapt 编进 SettingsProvider.apk 的 resources.arsc，
+         所以它只在**重新全量编译**之后生效。当前交付走的是
+         「解包旧 system.img 只替换文件」的文件级重打包链路，
+         SettingsProvider.apk 原封不动，改这里**不会进当前 OTA 包**。
+
+         因此还有第二条路径：运行时兜底，见
+             initfiles/zz-ardbeg-firstboot-fix.sh 第 9 节
+         它在每次开机用 svc wifi enable 和
+             service call bluetooth_manager 6 s16 ...
+         把当前这次开机也拉起来，并把状态写回 settings.db 供后续开机使用。
+         两条路径必须同时保留：全量编译时靠 overlay，文件级重打包时靠脚本。
+
+         【实测依据】
+
+         2026-11-06 在同一台设备上验证：
+             service call bluetooth_manager 8 s16 com.android.settings i32 0
+                 关掉蓝牙且 persist=false，dumpsys 显示 state OFF
+             settings put global bluetooth_on 1
+             service call bluetooth_manager 6 s16 com.android.settings
+                 enable() 返回 true，6 秒后 state ON
+             svc wifi disable / svc wifi enable
+                 settings get global wifi_on 从 0 变回 1，说明 svc 自带持久化
+         ==================================================================== -->
+    <bool name="def_wifi_on">true</bool>
+    <bool name="def_bluetooth_on">true</bool>
+
+</resources>

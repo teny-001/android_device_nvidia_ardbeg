@@ -33,10 +33,22 @@ LOCAL_MODULE_TAGS := optional
 
 LOCAL_CFLAGS += -Werror -Wno-error=unused-parameter -Wno-unused-parameter
 
+# ============================================================================
+# [修复 2026-10-28] 原内容是 external/tinyhal/include，但 cm-11.0(4.4.4) 的
+#   manifest 里根本没有 external/tinyhal 这个仓库（它是 5.0 才进 AOSP 的），
+#   本机镜像和 aosp-mirror 上也都没有，编译时 audio_hw.c 会直接
+#   "fatal error: tinyhal/audio_config.h: No such file or directory"。
+#
+#   好消息：这个设备树自带了一份 tinyhal 头文件
+#       device/nvidia/ardbeg/include/tinyhal/audio_config.h
+#   而 audio_hw.c 只用到 <tinyhal/audio_config.h> 这一个头，
+#   具体实现由本目录旁边的 configmgr/audio_config.c（libaudiohalcm）提供。
+#   所以把 include 路径指到设备树自己的 include/ 就行，不需要外部仓库。
+# ============================================================================
 LOCAL_C_INCLUDES += \
 	external/tinycompress/include \
 	device/nvidia/ardbeg/tinyalsa/include \
-	external/tinyhal/include \
+	device/nvidia/ardbeg/include \
 	external/expat/lib \
 	$(call include-path-for, audio-utils)
 

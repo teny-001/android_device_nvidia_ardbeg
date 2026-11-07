@@ -1,0 +1,18 @@
+# ardbeg: 给「会被误判成字母键盘」的外设用的空键表
+#
+# 为什么需要它：
+#   EventHub.cpp 用「这个设备能不能产生 AKEYCODE_Q」来判断它是不是字母键盘：
+#       if (hasKeycodeLocked(device, AKEYCODE_Q))
+#           device->classes |= INPUT_DEVICE_CLASS_ALPHAKEY;
+#   而 hasKeycodeLocked() 是拿设备的 keybitmask 去 Generic.kl 里查映射。
+#   某些游戏鼠标的第二个 HID 接口会声明支持 scancode 16，Generic.kl 把 16 映射成 Q，
+#   于是整机被判定成"接了硬件字母键盘"，LatinIME 就再也不弹软键盘了。
+#
+#   这里给这类外设指定一个没有任何 key 映射的键表，hasKeycodeLocked(AKEYCODE_Q)
+#   自然为 false，它就不再是 ALPHAKEY。
+#
+# 为什么不会影响鼠标本身：
+#   鼠标的左/右/中键和滚轮走的是 InputReader 的 CursorButtonAccumulator /
+#   CursorScrollAccumulator，按裸 scancode 处理，根本不查键表。
+#
+# 这个文件故意是空的（只有注释），不要往里加 key 映射。

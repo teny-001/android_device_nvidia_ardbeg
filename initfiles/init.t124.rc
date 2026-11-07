@@ -51,5 +51,22 @@ on boot
 
 on init
     # Mount a tmpfs into /mnt/tmp for hosting nvram, phs shared memory
-    mkdir /mnt/tmp 0770 system system
-    mount tmpfs tmpfs /mnt/tmp mode=0775,gid=1003
+    # ------------------------------------------------------------------------
+    # [修复 2026-10-28] 注释掉这两行，避免和 init.ardbeg.rc 里的同一段重复挂载。
+    #
+    #   本文件是被 init.ardbeg.rc 第 12 行 import 进来的。init 的解析顺序是：
+    #   parse_config() 先把 init.ardbeg.rc 自己的 action 全部注册进
+    #   action_list，整个文件解析完，才在 parser_done 处用 list_for_each
+    #   去 init_parse_config_file() 处理 import 列表。
+    #   所以 on init 的实际执行顺序是：
+    #       1) init.ardbeg.rc 的 on init  -> mkdir + mount 成功
+    #       2) 本文件这里的 on init       -> mkdir 报 EEXIST、mount 报 EBUSY
+    #   开机日志里会固定出现两条红字：
+    #       <3>init: mkdir failed for /mnt/tmp, File exists
+    #       <3>init: mount: Mounting tmpfs on /mnt/tmp failed: Device or resource busy
+    #   不致命，但会污染日志、让人误判挂载失败，所以这里注释掉。
+    #   保留 init.ardbeg.rc 里那份（设备级的，和 fstab/设备树在一起更好维护）。
+    # ------------------------------------------------------------------------
+    # mkdir /mnt/tmp 0770 system system
+    # mount tmpfs tmpfs /mnt/tmp mode=0775,gid=1003
+

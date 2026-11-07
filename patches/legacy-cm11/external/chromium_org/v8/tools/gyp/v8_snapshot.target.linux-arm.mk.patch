@@ -1,0 +1,72 @@
+--- a/external/chromium_org/v8/tools/gyp/v8_snapshot.target.linux-arm.mk
++++ b/external/chromium_org/v8/tools/gyp/v8_snapshot.target.linux-arm.mk
+@@ -10,19 +10,65 @@
+ gyp_shared_intermediate_dir := $(call intermediates-dir-for,GYP,shared)
+ 
+ # Make sure our deps are built first.
++# [修改 2026-10-28] 去掉了对 $(gyp_shared_intermediate_dir)/mksnapshot.arm 的依赖，
++# 原因见下面 run_mksnapshot 那段。
+ GYP_TARGET_DEPENDENCIES := \
+-	$(gyp_shared_intermediate_dir)/mksnapshot.arm \
+ 	$(call intermediates-dir-for,GYP,v8_tools_gyp_js2c_host_gyp,true)/js2c.stamp \
+ 	$(call intermediates-dir-for,GYP,v8_tools_gyp_generate_trig_table_host_gyp,true)/generate_trig_table.stamp
+ 
+ ### Rules for action "run_mksnapshot":
++# [修改 2026-10-28] 不再调用 mksnapshot 生成快照，改为直接使用"空快照"
++#
++# 原来的 recipe：
++#     cd .../v8/tools/gyp; mkdir -p $(gyp_intermediate_dir); \
++#     "$(gyp_shared_intermediate_dir)/mksnapshot.arm" \
++#         --log-snapshot-positions --logfile .../snapshot.log \
++#         --random-seed 314159265 $(gyp_intermediate_dir)/snapshot.cc
++#
++# 为什么改：
++#   1. mksnapshot.arm 是宿主可执行文件，但 mksnapshot.arm.host.linux-arm.mk 里
++#      硬编码 -m32，因为 V8 的 ARM 模拟器只在 ia32/arm 宿主上被支持
++#      （v8/src/globals.h:118-121 有硬性 #error）。
++#   2. 本机完全没有 32 位运行时（/lib/ld-linux.so.2 是断链），
++#      32 位可执行文件既编不出（ld 报 incompatible target）也跑不了。
++#   3. 于是只能放弃"预生成快照"这条路。
++#
++# 改成什么：
++#   v8/src/snapshot-empty.cc 是 V8 官方提供的"无快照"实现，
++#   它把 Snapshot::data_/size_/raw_data_/... 这些静态成员全部定义成 0，
++#   V8 启动时就会现场初始化堆。功能和有快照完全一致，只是启动稍慢一点。
++#   这个文件本来就是 v8_nosnapshot（宿主版）的源码，语义上是等价的替换。
++#
++# 为什么可以直接覆盖 snapshot.cc：
++#   下面的 LOCAL_GENERATED_SOURCES 里引用的就是 $(gyp_intermediate_dir)/snapshot.cc，
++#   它只需要是一个"定义了那些 Snapshot 静态成员"的编译单元，文件名无所谓。
+ $(gyp_intermediate_dir)/snapshot.cc: gyp_local_path := $(LOCAL_PATH)
+ $(gyp_intermediate_dir)/snapshot.cc: gyp_intermediate_dir := $(abspath $(gyp_intermediate_dir))
+ $(gyp_intermediate_dir)/snapshot.cc: gyp_shared_intermediate_dir := $(abspath $(gyp_shared_intermediate_dir))
+ $(gyp_intermediate_dir)/snapshot.cc: export PATH := $(subst $(ANDROID_BUILD_PATHS),,$(PATH))
+-$(gyp_intermediate_dir)/snapshot.cc: $(gyp_shared_intermediate_dir)/mksnapshot.arm $(GYP_TARGET_DEPENDENCIES)
+-	@echo "Gyp action: v8_tools_gyp_v8_gyp_v8_snapshot_target_run_mksnapshot ($@)"
+-	$(hide)cd $(gyp_local_path)/v8/tools/gyp; mkdir -p $(gyp_intermediate_dir); "$(gyp_shared_intermediate_dir)/mksnapshot.arm" --log-snapshot-positions --logfile "$(gyp_intermediate_dir)/snapshot.log" --random-seed 314159265 "$(gyp_intermediate_dir)/snapshot.cc"
++#
++# [修正 2026-10-28 第二版] recipe 里必须用 $(gyp_local_path)，不能用 $(LOCAL_PATH)
++#
++# 报错原文：
++#     cp: 对 'vendor/cm/terminal/v8/src/snapshot-empty.cc' 调用 stat 失败: 没有那个文件或目录
++#
++# 原因：GNU Make 对 **recipe 行是延迟展开**的 —— 只有在真正执行这条命令时才去
++# 展开 $(LOCAL_PATH)。而 AOSP 里 LOCAL_PATH 是全局变量，每个 Android.mk 开头
++# 都会 `LOCAL_PATH := $(call my-dir)` 重新赋值。等这条 recipe 跑到时，
++# 最后一个被 include 的模块（这里是 vendor/cm/terminal）已经把 LOCAL_PATH
++# 改成了它自己的目录，于是路径变成了 vendor/cm/terminal/v8/src/...
++#
++# 这也正是本文件开头那几行
++#     $(gyp_intermediate_dir)/snapshot.cc: gyp_local_path := $(LOCAL_PATH)
++# 存在的原因：`:=` 是**立即展开**，在解析阶段就把 LOCAL_PATH 的当时值
++# （external/chromium_org）快照进 gyp_local_path，recipe 里再用就不会被污染。
++# 原来的 mksnapshot recipe 用的就是 $(gyp_local_path)，我第一版漏用了。
++#
++# 注意：下面规则里的**依赖列表**用 $(LOCAL_PATH) 是对的，因为依赖列表在解析阶段
++# 就展开了，那时 LOCAL_PATH 还是 external/chromium_org。两处语义不同，别统一。
++$(gyp_intermediate_dir)/snapshot.cc: $(LOCAL_PATH)/v8/src/snapshot-empty.cc $(GYP_TARGET_DEPENDENCIES)
++	@echo "Gyp action: v8_snapshot -> 使用空快照 snapshot-empty.cc（64 位宿主无 32 位运行时）"
++	$(hide)mkdir -p $(gyp_intermediate_dir); cp $(gyp_local_path)/v8/src/snapshot-empty.cc $@
+ 
+ 
+ 

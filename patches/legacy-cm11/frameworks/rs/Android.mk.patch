@@ -1,0 +1,30 @@
+--- a/frameworks/rs/Android.mk
++++ b/frameworks/rs/Android.mk
+@@ -309,6 +309,27 @@
+ LOCAL_CFLAGS += $(rs_base_CFLAGS)
+ LOCAL_CFLAGS += -D__HOST__
+ 
++# [修改 2026-10-28] 与 frameworks/compile/libbcc/libbcc-host-build.mk 里的改动
++# 成对存在，原因完全相同：cpu_ref/linkloader 这套 ELF 加载器是纯 32 位设计，
++# 直接把宿主指针塞进 Elf32_Addr，64 位宿主编译时必然报
++#   cpu_ref/linkloader/android/librsloader.cpp:94:72: error:
++#       cast from 'const unsigned char*' to llvm::ELF::Elf32_Addr
++#       {aka unsigned int} loses precision [-fpermissive]
++#   cpu_ref/linkloader/include/impl/ELFObject.hxx:384/438/488/526/537/563/605:
++#       error: cast to pointer from integer of different size
++#       [-Werror=int-to-pointer-cast]
++# 宿主侧 librsloader 只被 libbcc 的 ExecutionEngine 链接，而 ExecutionEngine
++# 在 ROM 构建流程里从不执行（详见 libbcc-host-build.mk 的注释），
++# 所以放宽诊断不会带来运行时风险。
++#
++# 用 LOCAL_CPPFLAGS 而不是 LOCAL_CFLAGS：-fpermissive 对 C 文件无效。
++# 不能写 -Wno-error=permissive（GCC 4.8 报 "no option -Wpermissive"），
++# 改用不带参数的 -Wno-error 整体取消本模块的 -Werror，
++# 让 -fpermissive 降级出来的 pedwarn 真正只当警告。
++ifeq ($(BUILD_HOST_64bit),1)
++LOCAL_CPPFLAGS += -fpermissive -Wno-error
++endif
++
+ LOCAL_C_INCLUDES := \
+   $(LOCAL_PATH)/cpu_ref/linkloader \
+   $(LOCAL_PATH)/cpu_ref/linkloader/include \

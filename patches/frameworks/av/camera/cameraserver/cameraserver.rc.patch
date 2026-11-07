@@ -1,0 +1,23 @@
+--- a/frameworks/av/camera/cameraserver/cameraserver.rc
++++ b/frameworks/av/camera/cameraserver/cameraserver.rc
+@@ -1,6 +1,20 @@
++# ============================================================================
++# [CM14.1-on-ardbeg 修复 2026-11-06] cameraserver 指定执行域
++#
++# 和 audioserver 完全同因：4.4.4 的策略里没有 cameraserver 域（相机当时在
++# mediaserver 里），init 调 security_compute_create() 算不出域，直接放弃启动：
++#     init: could not get context while starting 'cameraserver'
++# 后果是 system_server 里 CameraManagerGlobal 反复打印
++#     E/CameraManagerGlobal: Camera service is unavailable
++# 不致命但每次启动都要等超时，且相机功能彻底不可用。
++#
++# 做法：seclabel u:r:mediaserver:s0（4.4.4 策略里有该域，实测可用）。
++# 详细推导见 audioserver.rc 头部注释。
++# ============================================================================
+ service cameraserver /system/bin/cameraserver
+     class main
+     user cameraserver
+     group audio camera input drmrpc
+     ioprio rt 4
++    seclabel u:r:mediaserver:s0
+     writepid /dev/cpuset/camera-daemon/tasks /dev/stune/top-app/tasks

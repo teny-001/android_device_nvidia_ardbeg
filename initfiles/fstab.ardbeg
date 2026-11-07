@@ -12,5 +12,78 @@
 /dev/block/platform/sdhci-tegra.3/by-name/MDA           /metadata           emmc      defaults                                               defaults
 /dev/block/platform/sdhci-tegra.3/by-name/SOS           /recovery           emmc      defaults                                               defaults
 /devices/platform/sdhci-tegra.2/mmc_host/mmc1           auto                auto      defaults                                               voldmanaged=sdcard1:auto,encryptable=userdata
-/devices/platform/tegra-ehci.2                          auto                auto      defaults                                               voldmanaged=usbdrive:auto
+# ============================================================================
+# [CM14.1-on-ardbeg 修复 2026-11-06] USB 存储（U 盘）的 vold 匹配路径
+#
+# 【原来写的是 /devices/platform/tegra-ehci.2 —— 这个设备根本不存在】
+#
+# 本机的 USB 控制器实际情况（实测 ls /sys/devices/platform/）：
+#
+#     tegra-ehci.1   -> usb1        <- OTG / USB2.0 口，U 盘插这里
+#     tegra-xhci     -> usb2, usb3  <- USB3.0 口
+#     tegra-ehci.2   -> 不存在
+#
+# tegra-ehci.2 这个条目是从 NVIDIA shield-common / CM11 设备树抄过来的，
+# 那份设备树对应的是另一块板子（有 3 个 EHCI 控制器）。g100 上只有 1 个。
+#
+# 【为什么写错一个数字就完全不工作】
+#
+# system/vold/DirectVolume.cpp 的 handleBlockEvent() 是这么匹配的：
+#
+#     const char *dp = evt->findParam("DEVPATH");
+#     for (size_t i = 0; i < mFstabEntries.size(); i++) {
+#         if (strncmp(dp, entry->blk_device, strlen(entry->blk_device)) == 0) {
+#             ...  // 命中
+#
+# 也就是**前缀字符串比较**。实测 U 盘插入后内核给出的 DEVPATH 是：
+#
+#     /devices/platform/tegra-ehci.1/usb1/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda
+#
+# 而 fstab 里是 "/devices/platform/tegra-ehci.2"，第 27 个字符就对不上，
+# strncmp 返回非零 -> 不命中 -> **这个 block 事件被 vold 完全忽略**。
+# 表现就是：dmesg 里 usb-storage / scsi / sd 全部正常打出，/dev/block/sda1
+# 也在，但 /storage/ 下什么都没有，vold 日志里连一条 sda 的记录都没有
+# （不是报错，是压根没进这个函数）。
+#
+# 【为什么必须带结尾的 '*' —— 这是最容易写错的地方】
+#
+# system/vold/VolumeManager.h 的 DiskSource::matches() 是这么实现的：
+#
+#     bool matches(const std::string& sysPath) {
+#         return !fnmatch(mSysPattern.c_str(), sysPath.c_str(), 0);
+#     }
+#
+# 用的是 **fnmatch()**，也就是 shell 通配符的**完整匹配**（whole-string match），
+# 不是 strncmp 前缀匹配。flags=0 时 '*' 可以匹配 '/'，所以
+# "/devices/platform/tegra-ehci*" 能匹配
+# "/devices/platform/tegra-ehci.1/usb1/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0"。
+#
+# 不带 '*' 的话 fnmatch 要求**整串完全相等**，永远匹配不上，
+# 于是 vold 收到 block uevent 后 mDiskSources 里没有一条命中，
+# 连一条日志都不打（不是报错，是压根没进那个分支），
+# dumpsys mount 里 Disks: 永远是空的。
+#
+# 这也是 AOSP 所有设备的 fstab 都写成 "xxx*" 的原因，例如
+# hammerhead:  /devices/platform/xhci-hcd.0.auto/usb1*
+# flo:         /devices/platform/xhci-hcd.0.auto*
+#
+# 【为什么写成不带编号的 /devices/platform/tegra-ehci*】
+#
+# 通配符形式下它会同时覆盖 tegra-ehci.0/.1/.2 任何编号，
+# 即使将来 DTB 里控制器编号变了也不用再改这里。
+# 当前只有一个 ehci 控制器，不存在误匹配。
+#
+# 【关于 USB3.0 口（tegra-xhci -> usb2/usb3）】
+#
+# 暂时没加。因为 voldmanaged=usbdrive:auto 里的 auto 会被 fs_mgr 展开成
+# usbdrive0 ~ usbdrive19 共 20 个挂载点。再加一条同 label 的条目会让两套
+# volume 抢同一批挂载点。如果确实要用 USB3.0 口，应该给第二条用不同的 label：
+#     /devices/platform/tegra-xhci*  auto  auto  defaults  voldmanaged=usbdrive3:auto
+#
+# 【验证】
+#   dmesg:  sd 0:0:0:0: [sda] Attached SCSI removable disk
+#   dumpsys mount:  DiskInfo{disk:8_0} flags=USB ... + VolumeInfo{public:8_1}
+#   ls /storage/ :  出现 usbdrive0
+# ============================================================================
+/devices/platform/tegra-ehci*                          auto                auto      defaults                                               voldmanaged=usbdrive:auto
 /dev/block/platform/sdhci-tegra.3/by-num/p1             /sdcard             vfat      defaults                                               wait,recoveryonly

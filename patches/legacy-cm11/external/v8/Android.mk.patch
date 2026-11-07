@@ -1,0 +1,54 @@
+--- a/external/v8/Android.mk
++++ b/external/v8/Android.mk
+@@ -25,8 +25,49 @@
+ 
+ # Build libv8 and d8
+ ifneq ($(filter $(TARGET_ARCH),x86 arm mips),)
+-    ENABLE_V8_SNAPSHOT = true
+-    include $(BASE_PATH)/Android.mksnapshot.mk
++    # [修改 2026-10-28] 64 位宿主上关掉 V8 快照生成（也就不需要 mksnapshot）
++    #
++    # 报错原文：
++    #     external/v8/src/globals.h:120:2: error: #error Target architecture arm
++    #         is only supported on arm and ia32 host
++    #     make: *** [.../mksnapshot.arm_intermediates/src/allocation.o] Error 1
++    #
++    # 原因链：
++    #   1. 这里原本无条件 ENABLE_V8_SNAPSHOT = true，于是
++    #      Android.libv8.mk:67-72 会先生成 $(intermediates)/snapshot.cc，
++    #      而生成它的工具是 mksnapshot.$(TARGET_ARCH)（即 mksnapshot.arm）。
++    #   2. mksnapshot.arm 是个**宿主可执行文件**（Android.mksnapshot.mk:8
++    #      写的是 LOCAL_IS_HOST_MODULE := true），但它编译时带
++    #      -DV8_TARGET_ARCH_ARM，并额外编入 src/arm/simulator-arm.cc，
++    #      靠 V8 自带的 ARM 模拟器在宿主上执行 ARM 代码来跑出快照。
++    #   3. V8 3.x 的 globals.h:118-121 硬性要求：
++    #          V8_TARGET_ARCH_ARM  =>  V8_HOST_ARCH_IA32 或 V8_HOST_ARCH_ARM
++    #      而本机宿主是 x86_64，globals.h:100 会把它识别成 V8_HOST_ARCH_X64，
++    #      于是直接 #error。当年 AOSP 4.4 的官方构建环境是 32 位宿主，
++    #      所以从来没人踩到。
++    #
++    # 为什么不去改 globals.h 放开 x64：
++    #   那个 #error 不是保守，是事实 —— 这一版 simulator-arm.cc 只在 ia32 上
++    #   验证过，它的寄存器/内存访问大量依赖 32 位指针宽度假设。
++    #   就算强编过去，模拟器跑出来的快照也可能是错的，而快照错了只会在
++    #   **设备上**表现为 v8 随机崩溃，极难定位。这种风险不值得冒。
++    #
++    # 为什么可以关：
++    #   V8 本来就支持"无快照"运行 —— Android.libv8.mk:73-75 的 else 分支
++    #   会改用 src/snapshot-empty.cc，v8 在启动时现场初始化堆。
++    #   代价只是启动稍慢、初始堆占一点内存，功能完全一致。
++    #   而且 external/v8 在 4.4 上基本是遗留物（WebView 早已用
++    #   external/chromium_org 里的 v8），这份 libv8 只为 d8 服务。
++    #
++    # 同时把 Android.mksnapshot.mk 的 include 也放进 else：
++    #   否则 mksnapshot.arm 这个 HOST_EXECUTABLE 仍然会因为
++    #   main.mk 的 host_modules_to_install 被单独编出来，照样 #error。
++    ifeq ($(BUILD_HOST_64bit),1)
++        ENABLE_V8_SNAPSHOT = false
++    else
++        ENABLE_V8_SNAPSHOT = true
++        include $(BASE_PATH)/Android.mksnapshot.mk
++    endif
+     include $(BASE_PATH)/Android.libv8.mk
+     include $(BASE_PATH)/Android.d8.mk
+ endif

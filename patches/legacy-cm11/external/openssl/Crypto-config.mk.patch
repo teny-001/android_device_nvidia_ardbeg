@@ -1,0 +1,44 @@
+--- a/external/openssl/Crypto-config.mk
++++ b/external/openssl/Crypto-config.mk
+@@ -672,7 +672,41 @@
+ target_src_files  := $(filter-out $($(target_arch)_exclude_files), $(target_src_files))
+ 
+ ifeq ($(HOST_OS)-$(HOST_ARCH),linux-x86)
++# ============================================================================
++# [修改 2026-10-28] 宿主按 64 位构建时，宿主侧**不使用任何汇编**。
++#
++# 背景：本机没有 32 位运行时（/lib/ld-linux.so.2 断链、无 /lib32），
++# 所以整个宿主侧改用 BUILD_HOST_64bit=1 + GCC 4.8 x86_64 编译
++# （见 ardbeg-work/build-rom.sh）。而 HOST_ARCH 仍然是 x86，
++# 原来的判断会让宿主走进 32 位分支，把 crypto/aes/asm/aes-586.S、
++# crypto/bn/asm/x86-mont.S 这些**32 位汇编**交给 64 位汇编器，报：
++#     aes-586.s:2988: Error: invalid instruction suffix for `pop'
++#     aes-586.s:3012: Error: invalid instruction suffix for `push'
++# （32 位汇编里 push/pop 省略操作数后缀，64 位模式无法推断宽度。）
++#
++# 那换成 x86_64 那份汇编行不行？也不行，试过了，会撞第二堵墙：
++#     crypto/bn/asm/x86_64-gcc.c:109:15: error:
++#         conflicting types for 'bn_mul_add_words'
++#     include/openssl/bn.h:237: note: previous definition
++#         #define BN_ULONG unsigned int
++# 因为 opensslconf.h 是**按目标平台**生成的（target 是 32 位 ARM），
++# 里面选的是 THIRTY_TWO_BIT，BN_ULONG 被定成 unsigned int；
++# 而 x86_64-gcc.c 的大数原语是按 64 位 BN_ULONG 写的，
++# 函数签名直接对不上。宿主和目标的字宽本来就不同，
++# 想共用这份 opensslconf.h 又要用 64 位汇编是自相矛盾的。
++#
++# 所以宿主统一走 unknown_arch 分支：不带任何 *_src_files 汇编清单、
++# 不带任何 asm 宏定义，全部用纯 C 实现（crypto/bn/bn_asm.c 等）。
++# 代价是宿主侧 libcrypto 慢一些，而它只被
++# frameworks/base/tools/obbtool 用到，属于一次性打包工具，
++# 完全不影响设备上跑的代码。
++# 目标侧（target_arch）不受影响，仍按 TARGET_ARCH=arm 走 arm 分支。
++# ============================================================================
++ifneq ($(strip $(BUILD_HOST_64bit)),)
++host_arch := unknown_arch
++else
+ host_arch := x86
++endif
+ else
+ host_arch := unknown_arch
+ endif

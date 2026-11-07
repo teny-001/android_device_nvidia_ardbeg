@@ -1,0 +1,61 @@
+--- a/external/chromium_org/v8/tools/js2c.py
++++ b/external/chromium_org/v8/tools/js2c.py
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env python
++# -*- coding: utf-8 -*-
+ #
+ # Copyright 2012 the V8 project authors. All rights reserved.
+ # Redistribution and use in source and binary forms, with or without
+@@ -33,7 +34,35 @@
+ 
+ import os, re, sys, string
+ import jsmin
+-import bz2
++
++# [修改 2026-10-28] 把 bz2 改成可选导入，修复宿主侧 V8 代码生成失败：
++#
++#     Traceback (most recent call last):
++#       File "../../tools/js2c.py", line 36, in <module>
++#         import bz2
++#     ImportError: No module named bz2
++#     make: *** [.../obj/GYP/shared_intermediates/libraries.cc] Error 1
++#
++# 原因：构建用的 python 是源码树自带的预编译版本
++#   prebuilts/python/linux-x86/2.7.5/bin/python2.7
++# 它的 lib-dynload 目录里**没有 _bz2.so**（打包时被裁掉了，同目录下
++# zlib 相关的 .so 也没有），所以 `import bz2` 必然失败。
++#
++# 为什么可以直接放过：
++#   bz2 在 js2c.py 里只有一个用处 —— 第 382 行
++#       if env['COMPRESSION'] == 'bz2':
++#           all_sources = bz2.compress("".join(all_sources))
++#   而 COMPRESSION 的值来自 gyp 变量 v8_compress_startup_data，
++#   external/chromium_org/v8/build/features.gypi:32 的默认值是 'off'
++#   （'v8_compress_startup_data%': 'off'），AOSP 的 GypAndroid 也没有覆盖它。
++#   也就是说 bz2.compress() 在 ROM 构建里从来不会被调用。
++#
++# 所以这里做成"导入失败就置 None，真正需要时再报错"，既不改行为，
++# 也不掩盖真实问题（真要开 bz2 压缩会看到明确的报错，而不是神秘失败）。
++try:
++    import bz2
++except ImportError:
++    bz2 = None
+ 
+ 
+ def ToCAsciiArray(lines):
+@@ -380,6 +409,15 @@
+   else:
+     raw_sources_declaration = RAW_SOURCES_COMPRESSION_DECLARATION
+     if env['COMPRESSION'] == 'bz2':
++      # [修改 2026-10-28] 配合上面的可选导入：真的走到这条路才发现
++      # python 缺 bz2 时，给一条能看懂的报错，而不是 "NoneType has no
++      # attribute compress"。正常情况下（COMPRESSION == 'off'）不会进来。
++      if bz2 is None:
++        sys.stderr.write(
++            "js2c.py: COMPRESSION == 'bz2' but this python has no bz2 module.\n"
++            "          Either build python with bz2, or set\n"
++            "          v8_compress_startup_data to 'off' in the gyp config.\n")
++        sys.exit(1)
+       all_sources = bz2.compress("".join(all_sources))
+     total_length = len(all_sources)
+     sources_data = ToCArray(all_sources)

@@ -1,0 +1,75 @@
+--- a/frameworks/base/tools/aapt/Images.cpp
++++ b/frameworks/base/tools/aapt/Images.cpp
+@@ -162,7 +162,34 @@
+ 
+ static int tick_type(png_bytep p, bool transparent, const char** outError)
+ {
+-    png_uint_32 color = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
++    // [修改 2026-10-28] 原代码是：
++    //     png_uint_32 color = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
++    //
++    // 这是**未定义行为**，导致宿主 aapt 在 64 位 GCC 4.8 -O2 下把 9-patch 的
++    // 红色 layout-bounds 刻度全部误判成非法颜色，进而让整个 framework-res
++    // 编译失败（664 条 "9-patch image ... malformed" + 169 条 "Public symbol
++    // drawable/xxx declared here is not defined"）。
++    //
++    // 原因：p[] 的元素类型是 png_byte（unsigned char）。参与运算时先做整型
++    // 提升，变成 **signed int**。当 p[3] == 0xFF 时，`p[3] << 24` 即
++    // `255 << 24` = 0xFF000000，超出 int 的正数范围，属于 C 标准里的
++    // 未定义行为（UB）。GCC 4.7 起会利用这个 UB 做推断：既然左移结果必须
++    // 能装进 int，那么 p[3] 必然 < 128，于是编译器认定结果的**第 31 位恒为 0**，
++    // 把下面 `color == COLOR_TICK`(0xFF000000) 与
++    // `color == COLOR_LAYOUT_BOUNDS_TICK`(0xFF0000FF) 两次比较直接折叠成恒假。
++    //
++    // 实测证据（加 fprintf 打印 tick_type 入参）：
++    //   纯红 (255,0,0,255) 连续 8 次打印 "tick_type COLOR-ERR ff0000ff"
++    //   而 0xFF0000FF 正是 COLOR_LAYOUT_BOUNDS_TICK 的值 —— 本该命中却未命中。
++    // 黑色 (0,0,0,255) 之所以侥幸没炸，是因为它 p[0]|p[1]|p[2] 全为 0，
++    // 走到了函数末尾的兜底分支 return TICK_TYPE_TICK，掩盖了同一个 UB。
++    //
++    // 修复：每个字节先显式转成 png_uint_32（unsigned int，32 位无符号）再移位，
++    // 全程无符号运算，不再有符号溢出，语义与原作者意图完全一致。
++    png_uint_32 color = ((png_uint_32) p[0])
++                      | ((png_uint_32) p[1] << 8)
++                      | ((png_uint_32) p[2] << 16)
++                      | ((png_uint_32) p[3] << 24);
+ 
+     if (transparent) {
+         if (p[3] == 0) {
+@@ -414,7 +441,17 @@
+     if (color[3] == 0) {
+         return Res_png_9patch::TRANSPARENT_COLOR;
+     }
+-    return (color[3]<<24) | (color[0]<<16) | (color[1]<<8) | color[2];
++    // [修改 2026-10-28] 与 tick_type() 同一类问题，必须一起修，否则 9-patch
++    // 各 patch 的颜色值会被算错：
++    //     原代码 return (color[3]<<24) | (color[0]<<16) | (color[1]<<8) | color[2];
++    // color[] 元素是 png_byte（unsigned char），整型提升后按 signed int 左移。
++    // alpha == 0xFF 时 `0xFF << 24` 溢出 int，是未定义行为；GCC 4.8 -O2 会据此
++    // 推断第 31 位恒为 0，把不透明 patch 的颜色算成 0x00xxxxxx（alpha 丢失）。
++    // 改为全程 unsigned 运算，语义不变。
++    return (((png_uint_32) color[3]) << 24)
++         | (((png_uint_32) color[0]) << 16)
++         | (((png_uint_32) color[1]) << 8)
++         |  ((png_uint_32) color[2]);
+ }
+ 
+ static void select_patch(
+@@ -873,7 +910,16 @@
+ 
+             // Check if image is really <= 256 colors
+             if (isPalette) {
+-                col = (uint32_t) ((rr << 24) | (gg << 16) | (bb << 8) | aa);
++                // [修改 2026-10-28] 原代码：
++                //   col = (uint32_t) ((rr << 24) | (gg << 16) | (bb << 8) | aa);
++                // 强制转换发生在**整个表达式算完之后**，而 rr/gg/bb/aa 都是 int。
++                // rr >= 0x80 时 `rr << 24` 已经溢出 int（UB），GCC 4.8 -O2 会据此
++                // 推断第 31 位恒为 0，导致调色板颜色值丢失最高位、不同颜色被误判成
++                // 同一个。改为先逐项转 uint32_t 再移位。
++                col = (((uint32_t) rr) << 24)
++                    | (((uint32_t) gg) << 16)
++                    | (((uint32_t) bb) << 8)
++                    |  ((uint32_t) aa);
+                 bool match = false;
+                 for (idx = 0; idx < num_colors; idx++) {
+                     if (colors[idx] == col) {

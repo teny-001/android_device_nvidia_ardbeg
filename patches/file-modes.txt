@@ -1,0 +1,43 @@
+# =============================================================================
+# file-modes.txt —— 源码树里「文件权限」类修复（不是代码补丁）
+#
+# 【为什么需要单独一份清单】
+#   unified diff（以及 patch(1)）**表达不了文件权限变更**。
+#   git 的 diff 里有 `old mode 100644 / new mode 100755`，但那是 git 的扩展，
+#   patch(1) 会直接忽略，_udiff.py 也不处理。所以权限类修复必须单独做。
+#
+# 【为什么会有权限问题】
+#   本工程的 cm-14.1 源码树是从归档解出来的（不是带 mode 的 git clone），
+#   所以**整棵树的可执行位全丢了**。实测：
+#       build/tools                         65 个文件缺 x
+#       external/e2fsprogs/misc             58 个文件缺 x
+#       vendor/cm/prebuilt/common/bin        5 个文件缺 x
+#   绝大多数不影响，因为 AOSP 自己编出来的模块走
+#   `LOCAL_MODULE_CLASS := EXECUTABLES` + installdeps，权限由 build 系统设，
+#   跟源文件权限无关。
+#
+#   唯一会出事的是**用 PRODUCT_COPY_FILES 裸拷**进镜像的脚本 ——
+#   这条路径是 `cp -f 源 目标`，权限原样带过去。
+#
+# 【已确认的受害者：system/bin/sysinit】
+#   vendor/cm/config/common.mk:52
+#       vendor/cm/prebuilt/common/bin/sysinit:system/bin/sysinit
+#   vendor/cm/prebuilt/common/etc/init.local.rc:156
+#       service sysinit /system/bin/sysinit
+#
+#   源码里 `vendor/cm/prebuilt/common/bin/sysinit` 是 0664，
+#   于是镜像里 /system/bin/sysinit 也是 0664（实测 200 字节、-rw-rw-r--），
+#   init 起来后：
+#       init: cannot execve('/system/bin/sysinit'): Permission denied
+#   sysinit 的职责是跑 /system/etc/init.d/ 下的开机脚本，起不来不致命，
+#   但每次开机都会在 kmsg 里留一条红色错误，而且 init.d 机制整个失效。
+#
+# 【格式】
+#   <相对源码树根的路径>  <期望权限（八进制）>  # 说明
+#   路径和权限之间用空格或 TAB 分隔。
+#
+# 【反向操作】
+#   uninstall.sh 会把权限改回 0644（也就是这棵树 checkout 出来的原始值）。
+# =============================================================================
+
+vendor/cm/prebuilt/common/bin/sysinit  0755   # init.cm.rc 里 `service sysinit` 直接 exec 它

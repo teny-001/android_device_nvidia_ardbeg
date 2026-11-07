@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================================
+   ArdbegIME —— 轻量软键盘（ardbeg / cm-14.1 临时输入法）
+   ============================================================================
+   为什么存在：
+     cm_ardbeg_tv 这个产品 inherit 的是 vendor/cm/config/common_full_tv.mk，
+     而 LineageOS 只把 LatinIME 放进 common_full_phone / common_mini_phone /
+     common_full_tablet_wifionly / common_mini_tablet_wifionly 四个配置里，
+     TV 配置没有。结果整个 ROM 一个输入法都没有：
+
+         # ime list -a -s
+         （空）
+
+     表现就是「设置 → WLAN」里点热点、弹密码框，点输入框弹不出键盘。
+
+     正规修法是把 LatinIME 加回 device.mk（已加，见 device/nvidia/ardbeg/
+     device.mk 第二十一节），但那要重新编译 system.img。这个 APK 是用树内
+     预编译工具链（aapt + dx.jar + signapk.jar）直接手工打包的，可以先让
+     设备能打字，不依赖构建系统。
+
+   安全模型：
+     只申请 BIND_INPUT_METHOD 这一项系统权限（由 InputMethodManagerService
+     在绑定时校验），不联网、不读存储、不申请任何运行时权限。
+  ============================================================================
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ardbeg.ime"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <!-- minSdk 24：本 ROM 是 7.1.2（API 25）。
+         之所以不写成 25，是为了以后刷到 7.0 的机器上也能装。 -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="25" />
+
+    <application android:label="@string/ime_name"
+                 android:allowBackup="false">
+
+        <!-- 输入法服务。三个要点缺一不可：
+             1) android:permission="android.permission.BIND_INPUT_METHOD"
+                必须声明，否则 InputMethodManagerService 拒绝绑定，
+                `ime list` 里也看不到这个输入法。
+             2) intent-filter 的 action 必须是 android.view.InputMethod，
+                这是 PackageManager 扫描输入法的唯一识别标志。
+             3) meta-data android.view.im 指向描述子类型的 XML，
+                没有它输入法会注册但拿不到 subtype，部分应用下不弹出。 -->
+        <service android:name=".ArdbegIME"
+                 android:label="@string/ime_name"
+                 android:exported="true"
+                 android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data android:name="android.view.im"
+                       android:resource="@xml/method" />
+        </service>
+
+    </application>
+</manifest>

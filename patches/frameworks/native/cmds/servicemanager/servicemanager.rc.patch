@@ -1,0 +1,34 @@
+--- a/frameworks/native/cmds/servicemanager/servicemanager.rc
++++ b/frameworks/native/cmds/servicemanager/servicemanager.rc
+@@ -1,3 +1,26 @@
++# ============================================================================
++# [CM14.1-on-ardbeg 修复 2026-11-06] servicemanager 注入 SELinux 旁路垫片
++#
++# 7.1 把「谁能注册 binder 服务」的权限检查从 binder class 拆到了新的
++# service_manager class（本目录 service_manager.c:83 的 selinux_check_access）。
++# 本机用的是原厂 4.4.4 的 /sepolicy，只有 84 个 class，没有 service_manager。
++# 于是 security_compute_av() 查 class 表直接失败返回 -1，servicemanager 判定
++# 「无权限」，开机日志里是：
++#     E/SELinux (213): Unknown class service_manager
++#     E/ServiceManager(213): add_service('batterystats',...) uid=1000
++#                           - PERMISSION DENIED
++#
++# permissive 救不了：失败发生在**判定过程本身**（class 查不到），走不到
++# permissive 分支。
++#
++# 后果：system_server 启动 AMS 时 BatteryStatsService.publish() 抛
++# SecurityException -> "Failed to start service
++# ActivityManagerService$Lifecycle: onStart threw an exception" ->
++# "FATAL EXCEPTION IN SYSTEM PROCESS"，zygote 退出，无限循环。
++#
++# 垫片覆盖 selinux_check_access() 无条件返回 0（=允许）。SELinux 本身已是
++# permissive 且策略残缺，服务注册这一层放行没有实际安全损失。
++# ============================================================================
+ service servicemanager /system/bin/servicemanager
+     class core
+     user system
+@@ -13,3 +36,4 @@
+     onrestart restart cameraserver
+     writepid /dev/cpuset/system-background/tasks
+ 
++    setenv LD_PRELOAD /system/lib/libselinux_bypass.so

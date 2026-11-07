@@ -1,0 +1,284 @@
+#
+# [CM14.1-on-ardbeg] init.usb.rc —— 补齐 MTP/PTP 的 legacy(android_usb) 规则
+#                              + 把 adb 配置提前到 on init
+#
+# 生成时间: 2026-11-06
+# 目标文件: system/core/rootdir/init.usb.rc
+#
+# ---------------------------------------------------------------------------
+# 一、这个补丁解决什么问题
+#
+# 用户报的现象: 「usb 没有盘符」——插上电脑只有 adb，没有 MTP 设备/盘符。
+#
+# 根因是四层，这层是最外面的一层:
+#
+#   AOSP 7.1 把 MTP/PTP 的配置整体搬到了 configfs 方案里
+#   (见 system/core/rootdir/init.usb.configfs.rc 第 25/38/55/68 行)，
+#   系统自带的 init.usb.rc 只保留 adb / accessory / audio_source 这几个
+#   最基础的 fallback，**一条 mtp/ptp 的 property 触发都没有**。
+#
+#   而本机内核是原厂 4.4.4 的 NVIDIA gadget，没有 configfs 支持
+#   (/config/usb_gadget 不存在，sys.usb.configfs=0)，只能走
+#   /sys/class/android_usb/android0 这套老接口。两边一凑，结果就是:
+#
+#       framework 把 sys.usb.config 设成 "mtp,adb"
+#         -> init 里没有任何 action 匹配
+#         -> /sys/class/android_usb/android0/functions 原封不动
+#         -> sys.usb.state 停在旧值
+#         -> UsbDeviceManager.waitForState("mtp,adb") 5 秒超时
+#         -> "Failed to switch USB config to mtp,adb"
+#         -> 一路 failsafe 回落到 adb-only
+#
+# 内核侧其实是好的: f_mtp 已编译进去，/dev/mtp_usb 存在，
+# 手工 echo mtp,adb > functions 能打出 "mtp_bind_config" 并成功枚举，
+# 缺的纯粹是 init 这一层的触发规则。
+#
+# ---------------------------------------------------------------------------
+# 二、为什么用 18d1:4ee1/4ee2/4ee5/4ee6，而不是原厂的 0955:701a/701b
+#
+#   1) 18d1:4ee2 是 AOSP 标准的「MTP + ADB」组合，Windows 10/11 自带 MTP 驱动，
+#      插上直接认成便携设备、能直接浏览内部存储；
+#      0955:xxxx 需要额外装 NVIDIA 的 USB 驱动才能识别。
+#
+#   2) 原厂 init.nv_dev_board.usb.rc 里写的是 ${ro.nv.usb.vid}，其值为字符串
+#      "0x0955"，而内核 DESCRIPTOR_ATTR(idVendor, "%04x\n") 的字段宽度是 4 ——
+#      sscanf 会把 "0x0955" 截成 "0x09"。实测:
+#          echo 0x0955 > idVendor; cat idVendor  ->  0009
+#          echo 0955   > idVendor; cat idVendor  ->  0955
+#      PID 同理，"0x701b" 被截成 "0x70" -> 0070。
+#      结果枚举出来是 0009:0070，一个根本不存在的 Vendor ID，
+#      Windows 不会给它加载 MTP 驱动。
+#      所以那个文件的 6 个 property 段已整段注释
+#      (改在 device/nvidia/ardbeg/initfiles/init.nv_dev_board.usb.rc)，
+#      这里用 AOSP 标准 ID 作为唯一来源。
+#
+#   3) 直接写不带 0x 前缀的十六进制(18d1 / 4ee2)，绕开 %04x 的字段宽度陷阱。
+#
+# ---------------------------------------------------------------------------
+# 三、附带的两处改动
+#
+#   1) 文件开头新增 on init 段，把 adb gadget 的配置从 on boot 提前到 on init。
+#      原因: 本机没有 fastboot 通道，adb 一断就只能走 APX 线刷救援。
+#      on boot 是 trigger 链最末尾，前面任何一环卡住 adb 就永远起不来。
+#      同时补上 functionfs 挂载和 f_ffs/aliases 别名 —— 原厂 4.4.4 内核
+#      **没有 f_adb**，只有 f_ffs，NVIDIA 的做法是把 "adb" 别名到 ffs。
+#      少了这两行，`functions adb` 直接 EINVAL，gadget 一次都不枚举。
+#
+#   2) service adbd 去掉 --root_seclabel=u:r:su:s0。
+#      4.4.4 的 adbd 二进制不认识这个参数，会直接退出。
+#
+# ---------------------------------------------------------------------------
+# 四、怎么用
+#
+#   patches/check.sh     检查补丁状态
+#   patches/install.sh   打补丁
+#   patches/uninstall.sh 撤销
+#
+#   手工: patch -p1 -d <源码树根> -i <本文件>
+#
+# ---------------------------------------------------------------------------
+--- a/system/core/rootdir/init.usb.rc
++++ b/system/core/rootdir/init.usb.rc
+@@ -1,3 +1,83 @@
++
++# =============================================================================
++# [CM14.1-on-ardbeg] USB/adb 提前配置 + NVIDIA functionfs 适配
++# -----------------------------------------------------------------------------
++# 【为什么要提前】
++# 原生逻辑把 setprop sys.usb.configfs 0 和 setprop sys.usb.config 放在
++# `on boot` 里，而 on boot 是 trigger 链最末尾：
++#     early-init -> init -> late-init -> early-fs -> fs -> post-fs
++#                -> post-fs-data -> early-boot -> boot
++# 前面任何一环卡住（fs_mgr 挂 /system 失败、critical 服务反复重启等），
++# on boot 就永远到不了，adb 也永远起不来。
++#
++# 这台设备没有 fastboot 通道，adb 一断就只能走 APX 线刷救援。
++# 所以把这几步提前到 `on init`：此时 trigger 链才走到第二个节点，
++# 后面无论出什么事，gadget 都已经配好、adbd 已经起来。
++#
++# 【为什么还要挂 functionfs —— 这是之前刷机黑屏的真正原因】
++# 上游 7.1 的写法是 `write .../functions adb`，前提是内核提供 f_adb
++# 这个功能（对应 /dev/android_adb 旧接口）。但 g100 的原厂 4.4.4 内核
++# 用的是 NVIDIA 自己的 gadget 方案，实测：
++#
++#     /sys/class/android_usb/ 下只有 f_ffs、f_mtp、f_rndis、f_ptp ...
++#     **没有 f_adb**
++#     设备实际 functions 值 = "ffs"
++#
++# NVIDIA 的做法（init.nv_dev_board.usb.rc）是在挂载阶段就做两件事：
++#     mount functionfs adb /dev/usb-ffs/adb uid=2000,gid=2000
++#     write /sys/class/android_usb/android0/f_ffs/aliases adb
++# 也就是把 "adb" 这个功能名**别名到 f_ffs**。少了这两行，
++# `functions adb` 直接 EINVAL，gadget 永远配不起来，USB 一次都不枚举 ——
++# 表现就是"刷完开机全黑、主机侧零枚举"。
++#
++# 【顺序不能变】
++#   1. mkdir /dev/usb-ffs{,/adb}     functionfs 的挂载点
++#   2. mount functionfs adb ...      建出 ep0/ep1/ep2
++#   3. write f_ffs/aliases adb       注册别名，必须早于 functions
++#   4. setprop sys.usb.configfs 0    走旧 android_usb 接口（非 configfs）
++#   5. setprop sys.usb.config adb    触发下面的 property action
++#
++# 安全性：/sys/class/android_usb/android0 是内核 virtual 设备
++# （android0 -> ../../devices/virtual/android_usb/android0），由驱动
++# probe 时创建，不依赖 ueventd，所以 on init 阶段就能写。
++# functionfs 也已确认编入内核（/proc/filesystems 里有 nodev functionfs）。
++# =============================================================================
++on init
++    mkdir /dev/usb-ffs 0770 shell shell
++    mkdir /dev/usb-ffs/adb 0770 shell shell
++    mount functionfs adb /dev/usb-ffs/adb uid=2000,gid=2000
++    write /sys/class/android_usb/android0/f_ffs/aliases adb
++    setprop sys.usb.configfs 0
++    setprop sys.usb.config adb
++
++# -----------------------------------------------------------------------------
++# 无条件兜底：不依赖 sys.usb.configfs 这个属性
++# -----------------------------------------------------------------------------
++# 上游那条是 `on property:sys.usb.config=adb && property:sys.usb.configfs=0`。
++# 它的 guard 依赖 sys.usb.configfs 已经被赋值，而上游只在 `on boot` 里赋。
++# 万一 on boot 没跑到，这个 guard 就永远不成立 —— 哪怕 sys.usb.config=adb
++# 已经设上了，gadget 也不会被配置。
++#
++# 这里再加一条**不带任何 guard** 的同名触发。它和上面那条会同时命中
++# （init 的属性触发是"所有匹配的 action 都执行"，不是二选一），
++# 两遍都写 gadget，但操作完全幂等（enable 0 -> 配置 -> enable 1），
++# 最坏情况是 USB 多复位一次，不影响功能。
++#
++# idVendor/idProduct 用 4.4.4 原厂的 18d1:D002（标准 adb-only 配置），
++# 与主机侧已缓存的 udev/adb 规则保持一致。
++#
++# 这台设备的实际配置是 configfs=0（走旧 android_usb 接口），
++# 所以不会和 init.usb.configfs.rc 里那套 configfs 流程打架。
++# -----------------------------------------------------------------------------
++on property:sys.usb.config=adb
++    write /sys/class/android_usb/android0/enable 0
++    write /sys/class/android_usb/android0/idVendor 18d1
++    write /sys/class/android_usb/android0/idProduct D002
++    write /sys/class/android_usb/android0/functions ${sys.usb.config}
++    write /sys/class/android_usb/android0/enable 1
++    start adbd
++    setprop sys.usb.state ${sys.usb.config}
++
+ # Copyright (C) 2012 The Android Open Source Project
+ #
+ # USB configuration common for all android devices
+@@ -12,7 +92,7 @@
+     mkdir /data/adb 0700 root root
+ 
+ # adbd is controlled via property triggers in init.<platform>.usb.rc
+-service adbd /sbin/adbd --root_seclabel=u:r:su:s0
++service adbd /sbin/adbd
+     class core
+     socket adbd stream 660 system system
+     disabled
+@@ -42,6 +122,109 @@
+     write /sys/class/android_usb/android0/functions ${sys.usb.config}
+     write /sys/class/android_usb/android0/enable 1
+     start adbd
++    setprop sys.usb.state ${sys.usb.config}
++
++# =============================================================================
++# [CM14.1-on-ardbeg 新增 2026-11-06] MTP / PTP 的 legacy(android_usb) 规则
++# -----------------------------------------------------------------------------
++# 【为什么必须自己写这两段】
++# AOSP 7.1 把 MTP/PTP 的配置整体搬到了 configfs 方案里
++# （见 system/core/rootdir/init.usb.configfs.rc 第 25/38/55/68 行），
++# 系统自带的 init.usb.rc 只保留 adb / accessory / audio_source 这几个最基础的
++# fallback，**一条 mtp/ptp 的 property 触发都没有**。
++#
++# 而本机内核是原厂 4.4.4 的 NVIDIA gadget，没有 configfs 支持
++# （/config/usb_gadget 不存在，sys.usb.configfs=0），只能走
++# /sys/class/android_usb/android0 这套老接口。两边一凑，结果就是：
++#
++#     framework 把 sys.usb.config 设成 "mtp,adb"
++#       -> init 里没有任何 action 匹配
++#       -> /sys/class/android_usb/android0/functions 原封不动
++#       -> sys.usb.state 停在旧值
++#       -> UsbDeviceManager.waitForState("mtp,adb") 5 秒超时
++#       -> "Failed to switch USB config to mtp,adb"
++#       -> 一路 failsafe 回落到 adb-only
++#
++# 最终表现就是用户看到的"插上电脑只有 adb，没有盘符"。
++# 内核侧其实是好的：f_mtp 已编译进去，/dev/mtp_usb 存在，
++# 手工 echo mtp,adb > functions 能打出 "mtp_bind_config" 并成功枚举，
++# 缺的纯粹是 init 这一层的触发规则。
++#
++# 【为什么用 18d1:4ee1/4ee2 而不是原厂的 0955:701a/701b】
++# 1) 18d1:4ee2 是 AOSP 标准的「MTP + ADB」组合，Windows 10/11 自带 MTP 驱动，
++#    插上直接认成便携设备、能直接浏览内部存储；0955:xxxx 需要额外装
++#    NVIDIA 的 USB 驱动才能识别。
++# 2) 原厂 init.nv_dev_board.usb.rc 里写的是 ${ro.nv.usb.vid}，其值为字符串
++#    "0x0955"，而内核 DESCRIPTOR_ATTR(idVendor, "%04x\n") 的字段宽度是 4 ——
++#    sscanf 会把 "0x0955" 截成 "0x09"。实测：
++#        echo 0x0955 > idVendor; cat idVendor  ->  0009
++#        echo 0955   > idVendor; cat idVendor  ->  0955
++#    VID 直接错成 0x0009。这是原厂配置里的一个隐藏 bug，我们不复用。
++#
++# 【bDeviceClass 为什么显式写 0】
++# MTP 是 per-interface 设备（bDeviceClass=0，由接口描述符声明
++# Still Image / MTP 类），而 rndis 需要 224(0xE0, Wireless Controller)。
++# 原来 adb-only 时是 0，但如果之前切过 rndis 残留了 224，
++# 主机就会按无线设备去解析，MTP 接口根本不会被读，所以这里显式清零。
++#
++# 【functions 为什么直接写 ${sys.usb.config}】
++# 内核 functions_store() 会按逗号切分，逐个查 function 注册表；
++# "adb" 不在注册表里，但它被 f_ffs/aliases 别名成了 ffs
++# （见上面 on init 段的 write .../f_ffs/aliases adb），
++# 所以 "mtp,adb" 实际会启用 mtp + ffs 两个 function。
++# 读回来时 functions_show 打印的是内核内部名，会显示成 "mtp,ffs"，
++# 这是正常现象，不是配置错了。
++#
++# 【顺序不能变】
++#   enable 0            gadget 从 UDC 断开，functions_store 才允许改写
++#                       （dev->enabled 时写 functions 直接返回 -EBUSY）
++#   idVendor/idProduct  描述符，enable 1 时才拷进 composite 的副本
++#   bDeviceClass        同上
++#   functions           装配 function 链表
++#   enable 1            重新 bind 并让主机重新枚举
++#   start adbd          ffs 的 ep0 需要 adbd 重新打开（已运行则是 no-op）
++# =============================================================================
++on property:sys.usb.config=mtp && property:sys.usb.configfs=0
++    write /sys/class/android_usb/android0/enable 0
++    write /sys/class/android_usb/android0/idVendor 18d1
++    write /sys/class/android_usb/android0/idProduct 4ee1
++    write /sys/class/android_usb/android0/bDeviceClass 0
++    write /sys/class/android_usb/android0/functions ${sys.usb.config}
++    write /sys/class/android_usb/android0/enable 1
++    setprop sys.usb.state ${sys.usb.config}
++
++on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=0
++    write /sys/class/android_usb/android0/enable 0
++    write /sys/class/android_usb/android0/idVendor 18d1
++    write /sys/class/android_usb/android0/idProduct 4ee2
++    write /sys/class/android_usb/android0/bDeviceClass 0
++    write /sys/class/android_usb/android0/functions ${sys.usb.config}
++    write /sys/class/android_usb/android0/enable 1
++    start adbd
++    setprop sys.usb.state ${sys.usb.config}
++
++# -----------------------------------------------------------------------------
++# PTP（相机模式）—— 和 MTP 同一份 f_mtp 驱动，只是接口描述符不同，
++# 内核里由 ptp_function 提供（android.c:596，name="ptp"）。
++# PID 用 AOSP 标准值 4ee5/4ee6，Windows 会认成「数码相机」。
++# -----------------------------------------------------------------------------
++on property:sys.usb.config=ptp && property:sys.usb.configfs=0
++    write /sys/class/android_usb/android0/enable 0
++    write /sys/class/android_usb/android0/idVendor 18d1
++    write /sys/class/android_usb/android0/idProduct 4ee5
++    write /sys/class/android_usb/android0/bDeviceClass 0
++    write /sys/class/android_usb/android0/functions ${sys.usb.config}
++    write /sys/class/android_usb/android0/enable 1
++    setprop sys.usb.state ${sys.usb.config}
++
++on property:sys.usb.config=ptp,adb && property:sys.usb.configfs=0
++    write /sys/class/android_usb/android0/enable 0
++    write /sys/class/android_usb/android0/idVendor 18d1
++    write /sys/class/android_usb/android0/idProduct 4ee6
++    write /sys/class/android_usb/android0/bDeviceClass 0
++    write /sys/class/android_usb/android0/functions ${sys.usb.config}
++    write /sys/class/android_usb/android0/enable 1
++    start adbd
+     setprop sys.usb.state ${sys.usb.config}
+ 
+ # USB accessory configuration

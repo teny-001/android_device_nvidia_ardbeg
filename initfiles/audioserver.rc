@@ -1,0 +1,71 @@
+# ============================================================================
+# audioserver 服务定义 —— CM14.1-on-ardbeg 定制版
+#
+# 与 AOSP 7.1 原版（frameworks/av/media/audioserver/audioserver.rc）的唯一
+# 差别是多了一行：
+#
+#     seclabel u:r:mediaserver:s0
+#
+# 【为什么需要这一行】
+#
+# 原版没有 seclabel，init 就要自己算域。看 system/core/init/service.cpp
+# 第 346-390 行：
+#
+#     if (!seclabel_.empty()) {
+#         scon = seclabel_;
+#     } else {
+#         getcon(&mycon);                     // init 自己的 context
+#         getfilecon(args_[0], &fcon);        // /system/bin/audioserver 的
+#         security_compute_create(mycon, fcon, "process", &ret_scon);
+#         if (rc < 0) {
+#             ERROR("could not get context while starting '%s'\n", name_);
+#             return false;                   // ← 服务直接不启动
+#         }
+#     }
+#
+# 第三步 security_compute_create() 要在策略的 process class 里查
+# 「从 init 域 exec audioserver_exec 文件应该切到哪个域」。
+# 本机策略是原厂 4.4.4 的，只有 307 个 type，其中**没有 audioserver 域**
+# （4.4.4 的音频全在 mediaserver 里，audioserver 这个独立进程是 6.0 才拆
+# 出来的）。于是查不到规则，返回 -1，dmesg 里就是：
+#
+#     init: could not get context while starting 'audioserver'
+#
+# 重复十几条，audioserver 永远起不来。
+#
+# 【后果】
+#
+# audioserver 不在 -> AudioPolicyService 没注册到 servicemanager ->
+# system_server 的 AudioService 在 startOtherServices() 里死等：
+#
+#     W/AudioSystem(1600): AudioPolicyService not published, waiting...
+#
+# 一直打这条，sys.boot_completed 永远不会置 1。这也是「设备不启动」的
+# 第三层原因（前两层分别是 system_server 的 setcontext 和 servicemanager
+# 的 service_manager class）。
+#
+# 【为什么选 mediaserver 域】
+#
+# 4.4.4 策略里有 mediaserver 域（那时候音频、相机全在里面），实测
+# /system/bin/mediaserver 能正常起来且 dmesg 里没有它的 avc deny。
+# 直接把 audioserver 也塞进这个域，setexeccon() 就能成功。
+#
+# permissive 模式下域之间没有实际权限差异，audioserver 在 mediaserver 域
+# 运行没有任何功能影响；dmesg 里会看到一些
+#     scontext=u:r:mediaserver:s0 tcontext=u:object_r:default_prop:s0
+# 的 avc denied，那是 permissive 的告警，不影响出声。
+#
+# 【长期正解】
+#
+# patch system/core/init/service.cpp，让 security_compute_create() 失败时
+# 降级成「不切域继续启动」而不是 return false，然后删掉这行 seclabel。
+# 补丁见 patches/system/core/init/service.cpp.patch。
+# ============================================================================
+service audioserver /system/bin/audioserver
+    class main
+    user audioserver
+    # media gid needed for /dev/fm (radio) and for /data/misc/media (tee)
+    group audio camera drmrpc inet media mediadrm net_bt net_bt_admin net_bw_acct qcom_diag
+    ioprio rt 4
+    seclabel u:r:mediaserver:s0
+    writepid /dev/cpuset/foreground/tasks /dev/stune/foreground/tasks

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  method.xml —— 输入法子类型描述
+  ============================================================================
+  PackageManager 通过 service 的 meta-data(android.view.im) 找到这个文件，
+  用它枚举输入法支持的 subtype（语言/模式）。
+
+  两个字段踩过坑：
+    android:settingsActivity
+        指向输入法的设置界面。留空或不写都行；但如果写成空字符串 ""，
+        部分 ROM 的 IME 选择器会试图启动一个空 Activity 而崩。
+        这里干脆不写。
+    android:isAsciiCapable
+        标成 true 后，系统在"只有 ASCII 需求"的场景（例如 WiFi 密码框这种
+        inputType=textPassword 的字段）才会默认选它。
+        密码框是本次要解决的主场景，所以必须写。
+  ============================================================================
+-->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsSwitchingToNextInputMethod="true">
+
+    <subtype
+        android:label="@string/subtype_en_us"
+        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeMode="keyboard"
+        android:isAsciiCapable="true" />
+
+</input-method>

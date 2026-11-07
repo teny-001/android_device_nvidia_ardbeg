@@ -1,0 +1,32 @@
+--- a/frameworks/base/tools/aapt/ZipEntry.h
++++ b/frameworks/base/tools/aapt/ZipEntry.h
+@@ -114,10 +114,27 @@
+      * Little Endian.
+      */
+     static inline unsigned short getShortLE(const unsigned char* buf) {
+-        return buf[0] | (buf[1] << 8);
++        // [修改 2026-10-28] 显式转 unsigned，避免 signed int 左移溢出（UB）。
++        // getShortLE 最大 0xFF<<8 = 0xFF00，本身不会溢出，这里统一写法只为与
++        // getLongLE 保持一致，不改变任何数值结果。
++        return ((unsigned short) buf[0]) | (((unsigned short) buf[1]) << 8);
+     }
+     static inline unsigned long getLongLE(const unsigned char* buf) {
+-        return buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
++        // [修改 2026-10-28] 原代码：
++        //     return buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
++        // buf 元素是 unsigned char，整型提升为 signed int 后左移。buf[3] >= 0x80
++        // 时 `buf[3] << 24` 溢出 int → 未定义行为。GCC 4.8 -O2 据此推断第 31 位
++        // 恒为 0，导致读出来的 32 位值高字节被清零。
++        //
++        // 实际影响：ZipEntry.cpp:426 用它读 ZIP 条目的 CRC32，
++        // CRC32 最高位为 1 的概率约 50%，属于必然踩中；此外
++        // mCompressedSize / mUncompressedSize / mCentralDirOffset
++        // 只要超过 16MB 也会踩中。签名类调用（buf[3] 为 0x02/0x04/0x06）侥幸无事。
++        // 改为 unsigned long 全程运算，语义不变。
++        return ((unsigned long) buf[0])
++             | (((unsigned long) buf[1]) << 8)
++             | (((unsigned long) buf[2]) << 16)
++             | (((unsigned long) buf[3]) << 24);
+     }
+     static inline void putShortLE(unsigned char* buf, short val) {
+         buf[0] = (unsigned char) val;

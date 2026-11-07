@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ==========================================================================
+   ardbeg_core_hardware.xml — TV 形态的 core hardware 特性声明
+  ==========================================================================
+
+   【为什么需要这个文件：这是「系统设置二级菜单闪退」的第二个根因】
+
+   症状：
+     点「设置 → 备份和重置」立刻闪退，logcat 是
+         java.lang.RuntimeException: Unable to start activity
+             ComponentInfo{com.android.settings/com.android.settings.Settings$PrivacySettingsActivity}:
+         java.lang.NullPointerException: Attempt to invoke interface method
+             'boolean android.app.backup.IBackupManager.isBackupServiceActive(int)'
+             on a null object reference
+
+   追查链：
+     1. PrivacySettingsActivity.onCreate() 里有
+            mBackupManager = IBackupManager.Stub.asInterface(
+                    ServiceManager.getService(Context.BACKUP_SERVICE));
+        ServiceManager 里没有 "backup" 这一项时，getService() 返回 null，
+        Stub.asInterface(null) 也返回 null，随后调用 isBackupServiceActive()
+        就是空指针。
+     2. 实测确认服务确实没起来：
+            # service check backup
+            Service backup: not found
+     3. 谁负责注册它：SystemServer.java:1107（7.1 源码）
+            if (mPackageManager.hasSystemFeature(PackageManager.FEATURE_BACKUP)) {
+                mSystemServiceManager.startService(BACKUP_MANAGER_SERVICE_CLASS);
+            }
+        FEATURE_BACKUP 就是字符串 "android.software.backup"。
+     4. 这个特性由 /system/etc/permissions/ 下的 XML 声明，而
+        handheld_core_hardware.xml / tablet_core_hardware.xml 里都有它。
+     5. 但本机跑的是 cm_ardbeg_tv 产品（ro.build.characteristics=tv），
+        device.mk 在 PRODUCT_IS_ATV=true 时走 device_atv.mk，
+        而 device_atv.mk 里原先只有一句 PRODUCT_CHARACTERISTICS := tv，
+        没有拷贝任何 core hardware 文件（device_tablet.mk 才有那两行）。
+        结果就是 TV 版的 /system/etc/permissions/ 里一个 core hardware 文件都没有。
+     6. 实测开机后 pm list features 只有 36 条，缺
+            android.software.backup / print / home_screen / input_methods /
+            device_admin / managed_users
+        以及 android.hardware.bluetooth / audio.output 等。
+
+  ==========================================================================
+   【连带被拖垮的东西（不只是备份）】
+
+   同一个 hasSystemFeature() 机制还卡着另外两个系统服务：
+
+     SystemServer.java:1219  FEATURE_PRINTING  -> PrintManagerService
+     SystemServer.java:711   FEATURE_BLUETOOTH -> BluetoothService
+
+   注意蓝牙的判定条件是 android.hardware.bluetooth，
+   不是 android.hardware.bluetooth_le。本机原先只声明了后者，
+   所以蓝牙服务从来没启动过。这才是「设置里蓝牙打不开」的真正原因，
+   跟 HAL 无关：bluetooth.default.so 和 bt_stack.conf 其实都齐全。
+
+  ==========================================================================
+   【为什么不用现成的 handheld_core_hardware.xml】
+
+   那份文件是给手机用的，除了软件特性外还硬声明了：
+       android.hardware.camera
+       android.hardware.touchscreen
+       android.hardware.sensor.compass / accelerometer
+       android.hardware.location / location.network
+   本机这些要么没有、要么驱动没通（触摸屏 Raydium 驱动还没补），
+   声明了会让应用商店下发依赖触摸/相机的应用，装上就崩。
+   更关键的是 android.software.leanback 的语义要求设备没有触摸屏，
+   两边的特性位互相打架。
+
+   所以这里只声明「确实有」的硬件 + 「框架服务需要」的软件特性。
+
+  ==========================================================================
+   【格式陷阱，改这个文件前必读】
+
+   XML 注释里不能出现连续两个短横线（这是 XML 规范硬性规定）。
+   把分隔线写成连续的一串短横线，会让整个文件解析失败，而 PackageManager
+   只是在 logcat 里打一条 SystemConfig 的 warning 就静默跳过，
+   开机后表现为「特性一个都没生效」，极难排查。
+   本文件的分隔线一律用等号，不要改成短横线。
+
+   【生效方式】
+   PackageManager 只在开机时扫一次 /system/etc/permissions/，
+   改完必须重新编译 system.img，或手动推文件后重启。
+  ==========================================================================
+-->
+<permissions>
+
+    <!-- ============ 硬件特性（已确认存在） ============ -->
+
+    <!-- HDMI 音频通路可用（card0 上有 "00-03: HDMI 0" PCM 设备）。
+         虽然板载扬声器还没出声，但音频输出整体是通的。
+         不声明这个特性，绝大多数播放器在安装或启动时就被判定为不兼容。 -->
+    <feature name="android.hardware.audio.output" />
+
+    <!-- 蓝牙：HAL 是 /system/lib/hw/bluetooth.default.so，
+         配置在 /system/etc/bluetooth/（bdaddr / bt_stack.conf / bt_vendor.conf），
+         内核侧 /sys/class/rfkill/rfkill0..2 都在。
+         声明它会让 SystemServer 启动 BluetoothService，
+         这是让蓝牙真正可用的前提。 -->
+    <feature name="android.hardware.bluetooth" />
+
+    <!-- TV 形态是横屏。竖屏不声明，避免应用以为可以切竖屏。 -->
+    <feature name="android.hardware.screen.landscape" />
+
+    <!-- ============ 软件特性（框架服务开关） ============ -->
+
+    <!-- 开机时启动 BackupManagerService，注册 "backup" 服务。
+         PrivacySettingsActivity / BackupSettings 依赖它，缺了必崩。 -->
+    <feature name="android.software.backup" />
+
+    <!-- 启动 PrintManagerService。缺了之后「设置 → 打印」同样会空指针。 -->
+    <feature name="android.software.print" />
+
+    <!-- 有 Launcher（Trebuchet）。缺了它 PackageManager 会认为系统没有桌面，
+         部分应用（尤其是 HOME 键相关）行为异常。 -->
+    <feature name="android.software.home_screen" />
+
+    <!-- 有输入法框架（LatinIME 在包里）。 -->
+    <feature name="android.software.input_methods" />
+
+    <!-- 支持设备管理器（DevicePolicyManager）。
+         缺了之后「设置 → 安全 → 设备管理器」会空指针。 -->
+    <feature name="android.software.device_admin" />
+
+    <!-- 支持多用户 / 受管理用户。本机是单用户，但 UserManager 相关 API
+         会按这个位决定行为，声明它是 AOSP 默认。 -->
+    <feature name="android.software.managed_users" />
+
+    <!-- app_widgets 在 lineage_tv.mk 里已经单独拷过一份
+         android.software.app_widgets.xml，这里不重复声明。
+         重复虽然不报错，但两份来源以后容易对不上。 -->
+
+    <!-- ============ 故意不声明的（等硬件验证后再加） ============ -->
+
+    <!-- android.hardware.touchscreen
+           触摸屏 Raydium 驱动还没补进内核。现在声明它，应用会以为可以触摸操作。
+           另外 leanback 要求设备无触摸屏，声明了会和 TV 特性冲突。 -->
+
+    <!-- android.hardware.microphone
+           录音通路（audio HAL 的 capture 路径）还没实测过。
+           声明了会让语音类应用尝试录音，HAL 不通时可能卡住。
+           等 tinycap 验证通过后再加。 -->
+
+    <!-- android.hardware.camera / camera.front
+           相机驱动未验证。 -->
+
+    <!-- android.hardware.location / location.network / location.gps
+           g100 无 GPS 模块；网络定位依赖 gms，本 ROM 不带。 -->
+
+    <!-- android.hardware.sensor.compass / accelerometer
+           传感器驱动未验证。 -->
+
+    <!-- android.software.voice_recognizers
+           没有语音识别服务（无 Google app），声明了会让
+           VoiceInteractionManagerService 起来但永远没有实现。 -->
+
+    <!-- android.software.connectionservice
+           依赖 telecom / telephony，TV 版没有电话功能。 -->
+
+</permissions>

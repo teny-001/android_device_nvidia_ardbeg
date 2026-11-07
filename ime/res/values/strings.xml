@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 输入法在「语言和输入法 → 当前输入法」列表里显示的名字 -->
+    <string name="ime_name">Ardbeg 键盘</string>
+    <!-- subtype 名称，会显示成「Ardbeg 键盘 / English (US)」 -->
+    <string name="subtype_en_us">English (US)</string>
+</resources>

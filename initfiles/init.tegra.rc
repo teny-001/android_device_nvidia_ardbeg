@@ -317,8 +317,45 @@ on property:ro.debuggable=1
     # EMC debug interface
     chmod 666 /sys/kernel/debug/tegra_emc/eack_state
 
-service sdcard /system/bin/sdcard -u 1023 -g 1023 -l /data/media /mnt/shell/emulated
-    class late_start
+# ============================================================================
+# 【2026-11-06 巡检修复】删除 CM11 遗留的 service sdcard
+# ============================================================================
+#   原来这里是（从 CM11 / Android 4.4.4 原样搬过来的）：
+#
+#       service sdcard /system/bin/sdcard -u 1023 -g 1023 -l /data/media /mnt/shell/emulated
+#           class late_start
+#
+#   这段在 7.1 上有两个致命问题，导致 init **每 5 秒拉起一次、立刻退出、无限循环**：
+#
+#   1) `-l` 选项在 7.1 的 sdcard 里已经不存在了。
+#      7.1 的 /system/bin/sdcard 只认：
+#          -u 指定 UID / -g 指定 GID / -U 指定设备属主 UID
+#          -m source_path 是多用户 / -w 运行时挂载有完整写权限
+#      getopt 遇到 -l 直接失败，进程打印 usage 后 exit(1)：
+#          E sdcard: usage: sdcard [OPTIONS] <source_path> <label>
+#          I init  : Service 'sdcard' (pid 21231) exited with status 1
+#          I init  : Service 'sdcard' (pid 21231) killing any children in process group
+#      实测 5 秒一轮，永不停歇（persist_log 里能一直刷到）。
+#
+#   2) 目标目录 /mnt/shell/emulated 在 7.1 里根本不存在。
+#      7.1 的多用户存储是 /storage/emulated + /mnt/runtime/{default,read,write}/emulated，
+#      /mnt/shell 这一层在 5.0 就被去掉了。
+#
+#   而且 —— 7.1 里 **/sdcard 已经不由 init 负责了**，改由 vold 在
+#   MountService 请求挂载时自己 fork 出来：
+#       /system/bin/sdcard -u 1023 -g 1023 -m -w /data/media emulated
+#   （实测该进程 PPid=158，也就是 vold；/dev/fuse 由它服务，
+#     /sdcard、/storage/emulated、/mnt/runtime/* 四个挂载点都正常可写。）
+#
+#   所以这里正确做法就是**整段删掉**，让 vold 独占管理。
+#   如果保留，除了白烧 CPU 和刷日志，还会把 logcat 环形缓冲区冲掉，
+#   直接影响「开机日志落 /cache」这个调试需求。
+#
+#   【判据】修好之后：
+#       getprop | grep init.svc.sdcard     -> 不再出现 restarting
+#       logcat | grep "usage: sdcard"      -> 不再出现
+#       pidof sdcard                       -> 仍有一个（vold 拉起的那个）
+# ============================================================================
 
 service fuse_sdcard1 /system/bin/sdcard -u 1023 -g 1023 -w 1023 -d /mnt/media_rw/sdcard1 /storage/sdcard1
     class late_start
@@ -363,8 +400,26 @@ service smbd /system/bin/smbd
 on device-added-/sys/block/sda
   mount vfat /dev/block/sda /mnt/media_rw/usbdrive
 
-on device-removed-/sys/block/sda
-  umount /mnt/media_rw/usbdrive
+# 【修复 2026-11-04】删掉了原来的
+#     on device-removed-/sys/block/sda
+#       umount /mnt/media_rw/usbdrive
+# 原因：Android 4.4.4 的 init **根本没有 umount / unmount 这个内建命令**。
+#   核对 system/core/init/keywords.h，挂载相关只有：
+#       KEYWORD(mount_all, COMMAND, 1, do_mount_all)
+#       KEYWORD(mount,     COMMAND, 3, do_mount)
+#   builtins.c 里也只有 do_mount / do_mount_all，没有任何卸载实现
+#   （unmount 是 Android 5.0 之后才加进来的）。
+#   所以这一行每次开机都会被 init 记成
+#       init: init.tegra.rc: 367: invalid command 'umount'
+#   属于纯粹的解析错误，而且**即使不报错也永远不会执行**。
+#
+#   那为什么干脆整段删掉，而不是留着 mount？
+#   保留 mount（插入时挂载）没有坏处，但配套的卸载在 KitKat 的 init 里
+#   无法表达，拔盘后 /mnt/media_rw/usbdrive 会残留一个失效挂载点。
+#   这段是 NVIDIA 从 ICS 时代带过来的遗留代码，Android 4.4 的 U 盘
+#   本来就该由 vold / StorageManager 管理（fstab 里的 usbdrive 条目），
+#   走 init 手工 mount 反而绕过了 vold 的权限和事件通知。
+#   如果以后确实需要 OTG U 盘，正确做法是交给 vold，而不是在 rc 里手挂。
 
 # Prepare TF service
 import init.tf.rc
@@ -388,8 +443,271 @@ on property:ro.boot.touch_vendor_id=0
 # unified scaling setup
 import init.ussrd.rc
 
-# Enable PowerService
-service powerservice /vendor/bin/powerservice
+# ============================================================================
+# [CM14.1 on ardbeg 移植修复 2026-11-05] powerservice 停用
+#
+# 【原来是什么】
+#   service powerservice /vendor/bin/powerservice
+#       class main
+#       user system
+#       group system
+#
+# 【症状】
+#   开机后 powerservice 无限崩溃重启，实测一次开机崩 **42 次**：
+#       F libc: Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid (powerservice)
+#       #00 pc 00000000  <unknown>                       ← 跳到 0 地址
+#       #01 pc 0000393b  /system/vendor/lib/libpowerservice.so
+#                        (android::PowerService::onFirstRef()+54)
+#       #02 pc 000007ed  /system/vendor/bin/powerservice
+#       #04 pc 00016ca1  /system/lib/libc.so (__libc_init+48)
+#   注意 #00 的 pc 是 0，也就是"调用了一个空函数指针"。
+#
+# 【根因：4.4 的守护进程 + 7.1 的 power HAL，接口对不上】
+#   反汇编 libpowerservice.so 的 PowerService::onFirstRef()：
+#       392a:  blx  hw_get_module           ; hw_get_module("power", &mModule)
+#       392e:  mov  r2, r0
+#       3930:  cbnz r0, 3950               ; if (err) goto err;
+#       3932:  ldr  r0, [r6, #20]           ; r0 = mModule
+#       3934:  mov  r1, r4                 ; r1 = "power"
+#       3936:  ldr  r3, [r0, #20]           ; r3 = mModule->common.methods
+#       3938:  ldr  r3, [r3, #0]            ; r3 = methods->open   ← 偏移 0
+#       393a:  blx  r3                      ; 直接调用，不判空
+#
+#   hw_module_t 的布局（两代一致，所以前面几步都对）：
+#       tag(0) module_api_version(4) hal_api_version(6) id(8)
+#       name(12) author(16) methods(20) dso(24)
+#   hw_module_methods_t 里偏移 0 是 open()：
+#       struct hw_module_methods_t { int (*open)(...); };
+#
+#   而 AOSP 的 power HAL（本机装的是 /system/lib/hw/power.default.so，
+#   因为 BoardConfig 里没设 TARGET_POWERHAL_VARIANT := tegra，
+#   hardware/nvidia/power 那份 power.tegra.so 根本没编进来）里是：
+#       static struct hw_module_methods_t power_module_methods = {
+#           .open = NULL,          // ← 就是这里
+#       };
+#   power HAL 是"模块式"接口（拿到 module 后直接调 module->setInteractive /
+#   module->powerHint），**不需要 open()**，所以 AOSP 把它写成 NULL。
+#
+#   NVIDIA 在 4.4 上提供的 power.tegra.so 给 open 塞了个非空函数（当成
+#   init 用），所以 4.4 时代 powerservice 跑得起来。换成 7.1 的
+#   power.default.so 之后，open 是 NULL，PowerService 又不判空，
+#   第一次 onFirstRef 就 blx 到 0 —— 而且 onFirstRef 是构造服务时必跑的，
+#   所以 100% 必崩，没有任何"偶尔成功"的可能。
+#
+# 【为什么直接停用，而不是给它补一个 power.tegra.so】
+#   1. powerservice 在 7.1 上提供的能力（nvpower 模式切换、EDP 限流）
+#      依赖 NVIDIA 私有的 IPowerService binder 接口和 /sys/kernel/tegra_* 节点，
+#      7.1 的框架层没有任何调用方，即使跑起来也是空转。
+#   2. 电池与温度上报由 healthd + thermal HAL 负责，不经过 powerservice。
+#      本机 /system/etc/thermal-engine.conf 与 thermal/ 目录里的配置仍在生效。
+#   3. 真要恢复，正确做法是用 7.1 的 power.h 重新编一个
+#      power.tegra.so（hardware/nvidia/power 里有源码），
+#      在 BoardConfig.mk 设 TARGET_POWERHAL_VARIANT := tegra，
+#      并且**不要**再去调 methods->open。这需要能全量编译，见
+#      patches/README.md 的"构建环境"一节。
+#   在那之前，让它崩 42 次只会污染日志、拖慢开机、干扰真正的崩溃排查。
+#
+# 【怎么恢复】
+#   把下面三行的注释去掉即可（记得同时把 TARGET_POWERHAL_VARIANT 设成 tegra，
+#   否则还是崩在同一个地方）。
+# ============================================================================
+#service powerservice /vendor/bin/powerservice
+#    class main
+#    user system
+#    group system
+
+
+# ============================================================================
+# [7.1 适配 2026-11-04] ============== 开机日志落盘到 /cache ==============
+#
+# 【需求】
+#   设备出问题时（音频不响 / 进不了系统 / adb 连不上）要能直接拿到开机日志。
+#   做法是三条腿：
+#     1) logcat 全 buffer 落盘到 /cache/boot_log.txt（框架层日志）
+#     2) dmesg + 声卡状态 + pstore 快照落盘到 /cache/bootlog/（内核层日志）
+#     3) pstore 持久化：把上一次崩溃前的 console 输出拷到 /cache/pstore/
+#
+# 【7.1 与 4.4 的关键区别（cm-11 的写法在 7.1 上可以简化）】
+#   cm-11(4.4.4) 的 logcat 没有 -D、也不支持 -b all，所以当时写成了
+#       logcat -b main -b system -b radio -v threadtime -f ... -r1024 -n2
+#   7.1 的 logcat 两者都支持：
+#       -b 的解析里显式处理了 "all"（遍历所有 log buffer）；
+#       -D 是 printDividers（在缓冲区之间打分隔线）。
+#   【勘误 2026-11-05】这里原来注释成"-D 输出到 stderr"，是错的。
+#       查 system/core/logcat/logcat.cpp 的 getopt 分支：
+#           case 'D': printDividers = true; break;
+#       它只影响打印，不改变输出去向，和 -f 一起用完全没问题。
+#       加它纯粹是为了日志里能看出 main/system/crash 各 buffer 的分界，
+#       排查崩溃时（比如"哪一行之后紧跟着 SIGSEGV"）很有用。
+#   所以这里恢复成通用写法：
+#       logcat -b all -D -f /cache/boot_log.txt
+#   再加 -r/-n 做轮转，防止 boot loop 时把 /cache 写满（/cache 只有 768MB，
+#   而且 7.1 的 logd 日志量比 4.4 大得多，不加轮转很危险）。
+#
+# 【/cache 什么时候可用】
+#   init.ardbeg.rc 的 "on fs" 里 mount_all /fstab.ardbeg 会把 CAC 分区挂到
+#   /cache（ext4，带 wait）。"on fs" 早于 "on post-fs-data"，
+#   所以下面这些服务在 post-fs-data 阶段写 /cache 一定可写。
+#
+# 【为什么 disabled + 手动 start】
+#   init 会在解析完 rc 后立刻按 class 启动服务，那时 /cache 可能还没挂上，
+#   logcat 会因为打不开输出文件而直接退出。disabled 让它不参与自动启动，
+#   由 post-fs-data 里的 start 精确控制时机。
+# ============================================================================
+
+# ---- 1) 框架层日志落盘 ----
+service bootlog_logcat /system/bin/logcat -b all -D -f /cache/boot_log.txt -r 2048 -n 2
     class main
-    user system
-    group system
+    user root
+    # log 组 gid=1007；root 本身不受 /dev/log 权限限制，带 log 组是为了
+    # 以后万一改成非 root 运行时也能读
+    group root system log
+    disabled
+    oneshot
+
+# ---- 2) 内核层快照（post-fs-data 阶段，system_server 还没起）----
+service bootlog_snapshot /system/bin/bootlog.sh post-fs-data
+    class main
+    user root
+    group root system
+    disabled
+    oneshot
+
+# ---- 3) 完全启动后的第二份快照（会额外抓 dumpsys audio）----
+# 用独立 service 而不是复用上面那个：oneshot 服务还在跑时再 start 是无效的，
+# init 只会打 "Service already started"。
+# 【服务名长度】init_parser.c 的 valid_name() 限制 16 字符，
+#   所以叫 bootlog_booted（14），不要写成 bootlog_snapshot_booted（24）。
+service bootlog_booted /system/bin/bootlog.sh booted
+    class main
+    user root
+    group root system
+    disabled
+    oneshot
+
+on post-fs-data
+    # 清掉上一轮残留：logcat -f 是追加模式，不清会把两次开机的日志混在一起
+    rm /cache/boot_log.txt
+    # pstore 目录（保存崩溃现场）
+    mkdir /cache/pstore 0770 root system
+    # 早期快照：此时 dmesg 里只有内核 + 早期 init 的打印，最干净
+    start bootlog_snapshot
+    # 开始落盘 logcat
+    start bootlog_logcat
+
+on property:sys.boot_completed=1
+    # 系统起来了，停掉 logcat，避免长期占用 /cache
+    stop bootlog_logcat
+    # 再打一份"完全启动后"的快照：此时音频 HAL 已加载，
+    # tinymix 能列出真实控件值，dumpsys audio 能拿到 AudioFlinger 状态
+    start bootlog_booted
+    # ========================================================================
+    # [2026-11-06 新增] 把 USB 切到 MTP + ADB
+    #
+    # 为什么必须等到 sys.boot_completed=1 才做，而不能像原来那样在 "on boot"
+    # 里 setprop sys.usb.config：
+    #
+    #   1) framework 会强行把 mtp 从 persist 里删掉。
+    #      UsbDeviceManager 的构造函数里有一段 b/31814300 的临时补丁
+    #      （frameworks/base/services/usb/java/com/android/server/usb/
+    #        UsbDeviceManager.java:358-367）：
+    #          String persisted = SystemProperties.get(USB_PERSISTENT_CONFIG_PROPERTY);
+    #          if (UsbManager.containsFunction(persisted, UsbManager.USB_FUNCTION_MTP)) {
+    #              SystemProperties.set(USB_PERSISTENT_CONFIG_PROPERTY,
+    #                      UsbManager.removeFunction(persisted, UsbManager.USB_FUNCTION_MTP));
+    #          }
+    #          setEnabledFunctions(null, false, false);
+    #      于是 persist.sys.usb.config 从 "mtp,adb" 变成 "adb"，
+    #      紧接着 setEnabledFunctions(null) 按 getDefaultFunctions() 读 persist
+    #      得到 "adb"，把 gadget 重配成 adb-only。
+    #      —— 所以**改 build.prop / default.prop 完全无效**，只能等它跑完再改回来。
+    #
+    #   2) 只 setprop 也不够。MtpService 是 UsbDeviceManager 在
+    #      containsFunction(mCurrentFunctions, MTP) 为真时才 startService 起来的。
+    #      framework 的 mCurrentFunctions 如果还是 "adb"，MtpServer 就不会去打开
+    #      /dev/mtp_usb，电脑上能枚举到 MTP 设备但点进去是空的。
+    #      必须走 binder 让 framework 自己完整走一遍状态机。
+    #
+    # 脚本 /sbin/usb_mtp_default.sh 内部会先轮询等 system_server 的 usb 服务
+    # publish 出来，再做切换，所以这里只要 start 就行。
+    # 详细的四层根因和 binder 事务号说明都在那个脚本的头部注释里。
+    # ========================================================================
+    start usb_mtp_default
+
+# ============================================================================
+# [新增 2026-10-28] ============== 调试期保证 adb 可用 ==============
+#
+# 【为什么需要强制】
+#   persist.sys.usb.config 是持久属性。上一版 build.prop 里写的是
+#       persist.sys.usb.config=mtp
+#   这个值已经被写进 /data/property/persist.sys.usb.config。init 启动时
+#   start_property_service() 会先读 /system/build.prop，再调
+#   load_persistent_properties() 用 /data/property 里的值**覆盖**它
+#   （见 system/core/init/property_service.c）。也就是说 system.prop 里
+#   虽然已经改成 mtp,adb，但只要设备上还留着旧的持久值，最终生效的
+#   仍然是 mtp。
+#   后果：sys.usb.config 停在 mtp，init.nv_dev_board.usb.rc 里
+#   "on property:sys.usb.config=mtp,adb" 那段永远不触发，adbd 不会被
+#   start，插上 USB 只能看到一个 MTP 设备，adb devices 空的。
+#
+# 【为什么放在 "on boot"】
+#   1) init.nv_dev_board.usb.rc 的 "on post-fs" 里要先
+#      mount functionfs adb /dev/usb-ffs/adb，adbd(4.4.4 用 ffs) 才能起来。
+#      "on boot" 在 "on post-fs" 之后，时序安全。
+#   2) 到 "on boot" 时 /sys/class/android_usb/android0/ 也已经就绪，
+#      下面的属性触发能真正写进 gadget。
+#
+# ============================================================================
+# 【2026-11-06 重大修订】原来的 "on boot / setprop sys.usb.config mtp,adb"
+# 已经**整段删除**，改成下面这个 late_start 的 oneshot 服务。
+#
+# 为什么不能再在 on boot 里 setprop —— 三个理由，每一个都独立致命：
+#
+#   A) 时机太早，必然被 framework 覆盖回去。
+#      on boot 时 system_server 还没起来。等它起来后
+#      UsbDeviceManager 构造时会执行 b/31814300 那段临时补丁
+#      （UsbDeviceManager.java:358-367），把 mtp 从 persist 里删掉，
+#      然后 setEnabledFunctions(null) 按 persist 的 "adb" 重配 gadget。
+#      结果是开机过程中 USB 要重配两次（MTP -> adb -> 稍后再 MTP），
+#      adb 通道会断两次，bringup 阶段很容易误判成"设备挂了"。
+#
+#   B) 只改 sysfs / 只 setprop 都不够，framework 的状态机必须自己走一遍。
+#      MtpService 由 UsbDeviceManager 在 containsFunction(mCurrentFunctions, MTP)
+#      为真时 startService。framework 的 mCurrentFunctions 还是 "adb" 的话，
+#      MtpServer 不会打开 /dev/mtp_usb，电脑上能看到 MTP 设备但点进去是空的。
+#      必须走 binder 调 IUsbManager.setCurrentFunction()。
+#
+#   C) 原厂 init.nv_dev_board.usb.rc 会覆盖 VID/PID（详见本文件末尾
+#      关于 initfiles/init.nv_dev_board.usb.rc 的说明）。
+#      那 6 个 property 段加载顺序排在我们之后，最后执行、最后覆盖，
+#      而且它写的 "0x0955"/"0x70xx" 会被内核 sscanf("%04x") 截成
+#      0009/0070 —— 一个不存在的 Vendor ID，Windows 不加载 MTP 驱动。
+#      所以那 6 段已经整段注释掉，改用 system/core/rootdir/init.usb.rc
+#      里 AOSP 标准的 18d1:4ee1/4ee2/4ee5/4ee6。
+#      （补丁见 patches/system/core/rootdir/init.usb.rc.patch）
+#
+# 现在的流程：
+#   on init  -> 配好 adb gadget（状态稳定，framework 不会来重配）
+#   boot_completed -> start usb_mtp_default
+#   usb_mtp_default -> 轮询等 usb 服务 -> service call usb 16 s16 "mtp" i32 1
+#   framework 自己走完状态机 -> MtpService 启动 -> MTP 可用
+#
+# 【注意：这里传的是 "mtp" 而不是 "mtp,adb"】
+#   UsbService.isSupportedCurrentFunction() 的白名单只认单个功能名
+#   （UsbService.java:306-320，switch 里只有 none/audio_source/midi/mtp/ptp/rndis）。
+#   传 "mtp,adb" 会被改写成 "none"，然后 setEnabledFunctions("none") 又回落到
+#   getDefaultFunctions()（= persist 里的 "adb"），结果什么都没发生。
+#   这个坑特别隐蔽：service call 返回的是正常的 Parcel(0)（void 方法），
+#   看起来调用成功了，只有 logcat 里一条
+#       W UsbService: Caller of setCurrentFunction() requested unsupported
+#                     USB function: mtp,adb
+#   传 "mtp" 之后，UsbDeviceManager.applyAdbFunction() 会自动把 adb 补回去。
+# ============================================================================
+
+service usb_mtp_default /sbin/usb_mtp_default.sh
+    class late_start
+    user root
+    group root system
+    oneshot
+    disabled
+

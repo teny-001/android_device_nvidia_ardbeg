@@ -1,0 +1,42 @@
+--- a/system/core/rootdir/init.zygote32.rc
++++ b/system/core/rootdir/init.zygote32.rc
+@@ -1,3 +1,33 @@
++# ============================================================================
++# [CM14.1-on-ardbeg 修复 2026-11-06] zygote 注入 SELinux 旁路垫片
++#
++# 本机沿用原厂 4.4.4 ramdisk 里的 /sepolicy，dmesg 实测只有
++#     1 users, 2 roles, 307 types, 84 classes, 3023 rules
++# 而 7.1 的 zygote fork 出 system_server 后要切到 u:r:system_server:s0，
++# 这个 type 在老策略里不存在 -> security_check_context() 返回 -1/EINVAL ->
++#     F/art: JNI FatalError called: com_android_internal_os_Zygote.cpp:631:
++#            selinux_android_setcontext failed
++# system_server 立刻 SIGABRT，zygote 跟着退出，init 再拉起，无限循环。
++# 现象是开机卡住、sys.boot_completed 永远为空，但 adb 是通的。
++#
++# 为什么 androidboot.selinux=permissive 没用：permissive 只影响「已判定
++# deny 的操作是否真的拦」，而这里是**决策过程本身出错**（type 查不到），
++# 压根走不到 permissive 分支。
++#
++# 为什么不能 selinux=0：内核配置是
++#     # CONFIG_SECURITY_SELINUX_BOOTPARAM is not set
++#     # CONFIG_SECURITY_SELINUX_DISABLE is not set
++# 既不能靠 cmdline 关，也不能运行时关。cmdline 加 lsm=capability 也试过，
++# 这个 4.4 内核的 security_module_enable() 不认，策略照旧加载。
++#
++# 做法：LD_PRELOAD libselinux_bypass.so，它覆盖
++# selinux_android_setcontext / selinux_android_setcon / is_selinux_enabled
++# 等符号统一返回 0（=不切域）。fork 出的子进程继承同一份内存映射，所以
++# system_server 和所有 app 都不会再撞这个问题。
++#
++# 长期正解：换自编内核（支持 policydb version 30）+ 7.1 完整 sepolicy 后，
++# 删掉这一行和 /system/lib/libselinux_bypass.so。
++# ============================================================================
+ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+     class main
+     socket zygote stream 660 root system
+@@ -7,4 +37,5 @@
+     onrestart restart cameraserver
+     onrestart restart media
+     onrestart restart netd
++    setenv LD_PRELOAD /system/lib/libselinux_bypass.so
+     writepid /dev/cpuset/foreground/tasks

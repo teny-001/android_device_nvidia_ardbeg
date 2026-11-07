@@ -1,0 +1,36 @@
+--- a/frameworks/av/media/audioserver/audioserver.rc
++++ b/frameworks/av/media/audioserver/audioserver.rc
+@@ -1,7 +1,33 @@
++# ============================================================================
++# [CM14.1-on-ardbeg 修复 2026-11-06] audioserver 指定执行域
++#
++# 原版没有 seclabel，init 要自己算域（system/core/init/service.cpp:346-390）：
++#     getcon(&mycon);  getfilecon(args_[0], &fcon);
++#     security_compute_create(mycon, fcon, "process", &ret_scon);
++#     if (rc < 0) { ERROR("could not get context ..."); return false; }
++# 第三步要在策略的 process class 里查「从 init 域 exec audioserver_exec
++# 应该切到哪个域」。本机策略是原厂 4.4.4 的（307 types），**没有 audioserver
++# 域**（4.4.4 的音频全在 mediaserver 里，audioserver 是 6.0 才拆出来的）。
++# 于是返回 -1，dmesg 里反复出现：
++#     init: could not get context while starting 'audioserver'
++#
++# 后果：audioserver 不在 -> AudioPolicyService 没注册 -> system_server 的
++# AudioService 在 startOtherServices() 里死等：
++#     W/AudioSystem: AudioPolicyService not published, waiting...
++# sys.boot_completed 永远不置 1（「设备不启动」的第三层原因）。
++#
++# 做法：直接指定 seclabel u:r:mediaserver:s0。4.4.4 策略里有 mediaserver 域
++# （那时候音频相机都在里面），实测 /system/bin/mediaserver 正常起且无 deny。
++# permissive 下域之间没有实际权限差异，功能不受影响。
++#
++# 长期正解：patch system/core/init/service.cpp 让 security_compute_create()
++# 失败时降级成「不切域继续启动」，然后删掉这行 seclabel。
++# ============================================================================
+ service audioserver /system/bin/audioserver
+     class main
+     user audioserver
+     # media gid needed for /dev/fm (radio) and for /data/misc/media (tee)
+     group audio camera drmrpc inet media mediadrm net_bt net_bt_admin net_bw_acct qcom_diag
+     ioprio rt 4
++    seclabel u:r:mediaserver:s0
+     writepid /dev/cpuset/foreground/tasks /dev/stune/foreground/tasks

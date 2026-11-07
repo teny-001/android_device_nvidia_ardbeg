@@ -105,10 +105,28 @@ service iprenew_eth0 /system/bin/dhcpcd -n
     oneshot
 
 # wifiloader - set the wifi commchip_id accordingly
+#
+# [CM14.1-on-ardbeg 修改 2026-11-06] 加 oneshot
+#
+# 原厂 4.4.4 的这份 rc 没写 oneshot，而 wifi_loader.sh 是个**一次性脚本**
+# （读完 commchip id、load 完 bcmdhd 就 exit 0）。没有 oneshot 的话，
+# init 会把「非 oneshot 服务退出」当成崩溃，立刻重新拉起：
+#
+#     dmesg: init: Service 'wifiloader' (pid 1322) exited with status 0
+#            init: Service 'wifiloader' (pid 1322) killing any children in process group
+#            init: Starting service 'wifiloader'...
+#
+# 实测每 5 秒一轮（561s / 566s / 571s / 576s / 581s ...），开机 10 分钟
+# 已经重启 115 次，同时刷 254 条
+#     init: Service wifiloader does not have a SELinux domain defined.
+# 把 dmesg 冲得全是噪音，真正的问题反而看不见。
+#
+# 加 oneshot 之后跑一次就完事，和 iprenew_eth0 / dns_masq 的写法一致。
 service wifiloader /system/bin/wifi_loader.sh
     class main
     user root
     group root
+    oneshot
 
 service dns_masq /system/bin/dnsmasq --no-daemon --no-resolv --no-poll --dhcp-option-force=43,ANDROID_METERED --dhcp-range=192.168.42.2,192.168.42.254,1h &
     class main
@@ -140,10 +158,31 @@ service p2p_supplicant /system/bin/wpa_supplicant.sh
 # Enable rbe
 # thresIncr:50  thresIncrCntMax:6  thresDecr:70  thresDecrCntMax:2
 # The change from default is the thresDecrCntMax.  Default is 3.
-service wlbwservice /system/bin/wlbwservice -t 50 6 70 2
-    class main
-    user system
-    group system inet net_admin
+#
+# 【修复 2026-11-04】注释掉 wlbwservice 服务定义。
+#
+# 原来的定义：
+#     service wlbwservice /system/bin/wlbwservice -t 50 6 70 2
+#         class main
+#         user system
+#         group system inet net_admin
+#
+# 问题：/system/bin/wlbwservice 在这套 ROM 里不存在（真机确认）：
+#     # ls -l /system/bin/wlbwservice
+#     /system/bin/wlbwservice: No such file or directory
+#   vendor blobs 只带了 libwlbwservice.so（见 ardbeg-vendor-blobs.mk:151），
+#   没有可执行文件本身。所以 init 每次开机都报：
+#     init: cannot find '/system/bin/wlbwservice', disabling 'wlbwservice'
+#
+#   wlbwservice 是 Broadcom 的 RBE（Rate-Based-Enhancement）省电策略服务，
+#   缺失只会让 WiFi 少一层动态速率/功耗调节，不影响联网和开机。
+#   它和音频、显示都无关，属于纯粹的噪音定义。
+#   以后若要恢复，需要从原厂包补回 /system/bin/wlbwservice 及其依赖。
+#
+# service wlbwservice /system/bin/wlbwservice -t 50 6 70 2
+#     class main
+#     user system
+#     group system inet net_admin
 
 # Start GPS daemon
 service gps-daemon /system/bin/glgps_nvidiaTegra2android -c /system/etc/gps/gpsconfig.xml

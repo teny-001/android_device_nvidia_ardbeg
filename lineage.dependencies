@@ -1,0 +1,7 @@
+[
+  {
+    "repository": "android_vendor_nvidia_ardbeg",
+    "target_path": "vendor/nvidia/ardbeg",
+    "revision": "cm-14.1"
+  }
+]

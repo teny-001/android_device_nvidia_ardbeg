@@ -1,0 +1,15 @@
+# Python 字节码缓存：tools/ 下的验收脚本运行时会生成，不能进仓库
+__pycache__/
+*.py[cod]
+
+# 宿主侧临时产物 / 编辑器残留
+*.log
+*.bak
+*.orig
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# 注意：不要把 *.orig 的规则套到 ardbeg-vendor-blobs.mk.orig-4.4.4 上——
+# 那个文件在 vendor 仓库里，是刻意保留的 4.4.4 原始清单留档。

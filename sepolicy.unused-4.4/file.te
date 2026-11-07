@@ -1,0 +1,35 @@
+# Copyright (C) 2010 The Android Open Source Project
+# Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# 【7.1 移植改动 2026-11-04】下面三个 type 声明被注释掉了。
+#   原因：7.1 的 BOARD_SEPOLICY_DIRS 里同时包含
+#       device/nvidia/shield-common/sepolicy/common
+#   而它的 file.te（NVIDIA 2017 年更新的版本，247 行）已经声明了同名 type：
+#       shield-common/sepolicy/common/file.te:61  phsd_socket
+#       shield-common/sepolicy/common/file.te:40  proc_wmem_default_writable
+#       shield-common/sepolicy/common/file.te:43  proc_wmem_max_writable
+#   同一个 type 被声明两次，checkpolicy 会直接报
+#       'duplicate declaration of type/attribute' 并中断编译。
+#   这里本文件只剩 23 行，是 4.4 时代的残缺版本，其余内容 shield-common 都覆盖了，
+#   所以只保留注释、不再重复声明。
+#
+# /data/misc
+#type phsd_socket, file_type;
+
+# /sys/net/core/wmem_default
+#type proc_wmem_default_writable, fs_type;
+
+# /sys/net/core/wmem_max
+#type proc_wmem_max_writable, fs_type;

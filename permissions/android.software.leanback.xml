@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================================
+   [TV 模式 2026-10-28] 声明 Leanback 特性
+
+   这个文件会被 PRODUCT_COPY_FILES 装到 /system/etc/permissions/ 下，
+   由 PackageManager 在开机时读进系统特性表，等价于让
+       PackageManager.hasSystemFeature("android.software.leanback")
+   返回 true。
+
+   为什么需要它：
+   cm-11(4.4.4) 本身不带任何 Android TV 组件——build/target/product/ 下没有
+   tv 产品模板，packages/apps/ 下没有 LeanbackLauncher / TvSettings，
+   frameworks/native/data/etc/ 下也没有 android.software.leanback.xml。
+   而 Kodi、YouTube、Netflix 这类应用判断"要不要走 TV 大屏界面"时，
+   看的就是这个特性位。不声明它，即使 ro.build.characteristics=tv，
+   它们仍然按平板界面显示。
+
+   注意：
+   1. 这里**故意不声明** android.hardware.type.television。
+      那个特性是给"没有触摸屏的纯电视设备"用的，本机有触摸屏，
+      声明了会让一部分应用在安装时因为"特性冲突"直接拒绝安装。
+   2. 也不声明 android.software.leanback_only —— 那要求设备没有触摸屏。
+   3. 声明 leanback 之后有个副作用：只提供 CATEGORY_LEANBACK_LAUNCHER
+      入口的纯 TV 应用，不会出现在 Trebuchet 的桌面列表里（Trebuchet 只认
+      CATEGORY_LAUNCHER）。本机用蓝牙/USB 鼠标操作，这类应用可以用
+      adb shell monkey -p <包名> 1 或第三方 TV 桌面启动。
+  ============================================================================
+-->
+<permissions>
+    <feature name="android.software.leanback" />
+</permissions>

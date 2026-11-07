@@ -1,0 +1,33 @@
+--- a/art/build/Android.common.mk
++++ b/art/build/Android.common.mk
+@@ -171,7 +171,29 @@
+   endif
+ endif
+ # We build with GCC 4.6 on the host.
+-ART_HOST_CFLAGS += -Wthread-safety
++# ============================================================================
++# [修改 2026-10-28] -Wthread-safety 只在宿主 GCC 恰好是 4.6 时加。
++#
++# 上面那句 "We build with GCC 4.6 on the host" 说的是 AOSP 自带的
++# prebuilts/gcc/linux-x86/host/i686-linux-glibc2.7-4.6 —— 那是 32 位程序，
++# 本机跑不起来（没有 32 位运行时），所以宿主侧改用了 GCC 4.8 x86_64
++# （BUILD_HOST_64bit=1，见 ardbeg-work/build-rom.sh）。
++#
++# -Wthread-safety 是 GCC 4.6 里存在的实验性选项，GCC 4.7 就删掉了。
++# 4.8 上会直接报：
++#     g++: error: unrecognized command line option '-Wthread-safety'
++#     make: *** [.../dex2oat_intermediates/dex2oat.o] Error 1
++#
++# 注意上面 target 那段逻辑本来就是这么处理的（"not for GCC 4.7
++# where this feature was removed"），只是宿主这段写死了无条件加。
++# 这里照抄 target 的写法，按实际宿主 GCC 版本判断。
++# ============================================================================
++ifeq ($(ART_HOST_GCC_VERSION),)
++  ART_HOST_GCC_VERSION := $(shell $(HOST_CC) -dumpversion 2>/dev/null)
++endif
++ifneq ($(filter 4.6 4.6.%, $(ART_HOST_GCC_VERSION)),)
++  ART_HOST_CFLAGS += -Wthread-safety
++endif
+ 
+ # Make host builds easier to debug and profile by not omitting the frame pointer.
+ ART_HOST_CFLAGS += -fno-omit-frame-pointer

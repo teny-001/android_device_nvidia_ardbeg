@@ -1,0 +1,65 @@
+# ============================================================================
+# installd 服务定义 —— CM14.1-on-ardbeg 定制版
+#
+# 与 AOSP 7.1 原版（frameworks/native/cmds/installd/installd.rc）的唯一差别
+# 是末尾多了一行：
+#
+#     setenv LD_PRELOAD /system/lib/libselinux_bypass.so
+#
+# 【为什么需要这一行】
+#
+# installd 给每个应用建完 /data/data/<pkg> 和 /data/user_de/0/<pkg> 之后，
+# 要调 selinux_android_restorecon_pkgdir() 给目录打 SELinux 标签
+# （frameworks/base/cmds/installd/commands.cpp 的 restorecon_data()）。
+#
+# 本机 /file_contexts.bin 是原厂 4.4.4 的（11273 字节），而 libselinux 是
+# 7.1 编译的，两者对 file_contexts 二进制格式的解析不一致，selabel_open()
+# 拿到的 handle 不可用，restorecon 内部对它的成员解引用就撞空指针。
+# /data/tombstones/tombstone_09 里的现场：
+#
+#     pid: 25711, tid: 25711, name: installd  >>> /system/bin/installd <<<
+#     signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x4
+#     #00 pc 0000c612  /system/lib/libselinux.so
+#     #01 pc 0000b993  /system/lib/libselinux.so
+#     #02 pc 00004e5b  /system/bin/installd
+#
+# 【后果 —— 这条链很长，是「设备不启动」的第二层原因】
+#
+#   installd 每建一个应用目录就 SIGSEGV 一次
+#     -> /data/user_de/0/com.android.providers.settings 永远建不出来
+#     -> SettingsProvider.onCreate() 里 SQLiteOpenHelper 打不开
+#        /data/user_de/0/com.android.providers.settings/databases/settings.db
+#        E/SQLiteLog: (14) os_unix.c:32493: (2) open(
+#            /data/user_de/0/com.android.providers.settings/databases/settings.db)
+#        -> SQLiteCantOpenDatabaseException: unknown error (code 14)
+#     -> InputMethodManagerService 构造时读 Settings.Secure 拿到异常
+#        java.lang.RuntimeException: Failed to create service
+#            com.android.server.InputMethodManagerService$Lifecycle:
+#            service constructor threw an exception
+#        Caused by: Unable to get provider
+#            com.android.providers.settings.SettingsProvider
+#     -> "FATAL EXCEPTION IN SYSTEM PROCESS"，zygote 退出，无限循环
+#
+# 注意路径是 /data/user_de/0/（7.1 新增的 device-encrypted 存储），
+# 不是 /data/data/ —— 7.1 的 SettingsProvider 把 settings.db 放在前者。
+#
+# 【垫片做了什么】
+#
+# libselinux_bypass.so 覆盖了
+#     selinux_android_restorecon()
+#     selinux_android_restorecon_pkgdir()
+#     selinux_android_restorecon_recursive()
+# 统一返回 0（=restorecon 成功），跳过打标签。SELinux 已经是 permissive
+# 且策略残缺，标签打不打都没有实际影响；关键是让 installd 别死。
+#
+# 【副作用说明】
+#
+# 因为不打标签，新装应用的数据目录 SELinux 标签会是父目录继承来的
+# u:object_r:system_data_file:s0 而不是 u:object_r:app_data_file:s0:c512,c768。
+# permissive 下不产生任何 deny，功能不受影响；dmesg 里能看到对应的
+# avc denied 记录，那是 permissive 的告警，可以忽略。
+# ============================================================================
+service installd /system/bin/installd
+    class main
+    socket installd stream 600 system system
+    setenv LD_PRELOAD /system/lib/libselinux_bypass.so

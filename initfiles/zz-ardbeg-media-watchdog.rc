@@ -1,0 +1,51 @@
+# ============================================================================
+# zz-ardbeg-media-watchdog.rc —— media 服务自愈守护的 init 定义
+#   设备：g100 (ardbeg / Tegra K1 T124 / TN8 P1761)
+#   系统：LineageOS 14.1 (Android 7.1.2)  cm_ardbeg_tv-eng
+#
+# ■ 解决什么问题
+#   media.extractor / media.codec 在 servicemanager 里的句柄会被
+#   重复注册(ALREADY REGISTERED, OVERRIDE) + 旧 binder 节点延迟死亡通知
+#   清成 0，导致 MediaPlayer 报
+#       "Unable to connect to media extractor service"
+#   所有视频/音频播放全部失败。
+#   详细原理和现场日志见 /system/bin/ardbeg_media_watchdog.sh 头部注释。
+#
+# ■ 放在 /system/etc/init/ 为什么能生效
+#   init 会自动解析该目录下所有 *.rc，开机日志可见
+#       init: (Parsing /system/etc/init/mediacodec.rc took 0.00s.)
+#   所以本文件不需要重打 boot.img，push 进去下次开机即生效。
+#
+# ■ 文件名为什么以 zz- 开头
+#   init 按目录遍历顺序解析 rc；加 zz- 前缀让它排在 mediaextractor.rc /
+#   mediacodec.rc 之后解析，确保 restart 时目标服务定义已存在。
+#
+# ■ 【坑，务必注意】服务名不能超过 16 个字符
+#   最初这里写的是 ardbeg_media_watchdog（21 字符），结果开机后
+#       getprop init.svc.ardbeg_media_watchdog   -> 空
+#       setprop ctl.start ardbeg_media_watchdog  -> init: no such service
+#   而 dmesg 里只有一行不起眼的：
+#       init: /system/etc/init/zz-ardbeg-media-watchdog.rc:
+#             24: invalid service name 'ardbeg_media_watchdog'
+#   原因在 system/core/init/service.cpp 的 ServiceParser::IsValidName()：
+#       if (name.size() > 16) return false;
+#       for (char c : name) if (!isalnum(c) && c != '_' && c != '-') return false;
+#   7.1 的 init 硬性限制服务名 <= 16 字符（8.0 才放宽）。
+#   更麻烦的是：这个错误**不会**让 init 报 "Failed to parse"，
+#   文件照样打出 "Parsing ... took 0.01s."，只有 dmesg 里那一行能看出问题，
+#   logcat 完全看不到。排查时一定要 `dmesg | grep "invalid service name"`。
+#
+#   所以服务名用 ardbeg_mediawd（14 字符）。
+#   注意：**只改服务名，脚本文件名保持不变**，两者是独立的：
+#       service <服务名> <可执行文件路径>
+#   服务名只用于 init.svc.<名字> 属性和 ctl.start/ctl.stop/ctl.restart。
+# ============================================================================
+
+service ardbeg_mediawd /system/bin/ardbeg_media_watchdog.sh
+    # 必须是 root：脚本里用 `setprop ctl.restart`，而 ctl.* 属性
+    # init 只允许 root 写，普通 uid 会被拒。
+    class late_start
+    user root
+    group root system
+    # 单实例、常驻循环（脚本自己 while true），所以不是 oneshot。
+    # 不写 disabled，随 late_start 类自动启动。

@@ -1,0 +1,55 @@
+--- a/system/vold/Utils.cpp
++++ b/system/vold/Utils.cpp
+@@ -282,14 +282,28 @@
+         }
+     }
+ 
++    // [CM14.1-on-ardbeg] setexeccon 失败时不要 abort()。
++    //
++    // 原生代码在这里 abort()，理由是"设不上 SELinux 域说明环境坏了，
++    // 与其带着错误的域去 exec 不如直接死"。但本机 SELinux 是 Disabled
++    // （getenforce -> Disabled），setexeccon() 必然返回 -1，于是：
++    //   vold 每次调 blkid / sgdisk / fsck_msdos 都 SIGABRT 一次，
++    //   init 把 vold 重新拉起来，vold 再自杀，无限循环，
++    //   表现是 logcat 里
++    //       E vold: Failed to setexeccon
++    //       --------- beginning of crash
++    //   volume 永远卡在 CHECKING 状态，U 盘/SD 卡都挂不上。
++    // tombstone 里能看到 signal 6 (SIGABRT)，栈顶就是 vold 自己的 abort。
++    //
++    // SELinux 关闭时"设不上域"是预期行为，不是环境损坏，
++    // 降级成 WARNING 继续执行才是对的：子进程会以 vold 自己的域运行，
++    // 而 SELinux 关闭时域本来就无所谓。
+     if (setexeccon(context)) {
+-        LOG(ERROR) << "Failed to setexeccon";
+-        abort();
++        LOG(WARNING) << "Failed to setexeccon, continuing anyway (SELinux likely disabled)";
+     }
+     status_t res = android_fork_execvp(argc, argv, NULL, false, true);
+     if (setexeccon(nullptr)) {
+-        LOG(ERROR) << "Failed to setexeccon";
+-        abort();
++        LOG(WARNING) << "Failed to reset setexeccon, continuing anyway";
+     }
+ 
+     free(argv);
+@@ -314,14 +328,15 @@
+     }
+     output.clear();
+ 
++    // [CM14.1-on-ardbeg] 同上：popen 这条路径也不要 abort()。
++    // 这里的调用方是 blkid（读分区 UUID/label），SELinux Disabled 时
++    // 原生代码会在这里直接 SIGABRT，导致 vold 无限重启。
+     if (setexeccon(context)) {
+-        LOG(ERROR) << "Failed to setexeccon";
+-        abort();
++        LOG(WARNING) << "Failed to setexeccon, continuing anyway (SELinux likely disabled)";
+     }
+     FILE* fp = popen(cmd.c_str(), "r");
+     if (setexeccon(nullptr)) {
+-        LOG(ERROR) << "Failed to setexeccon";
+-        abort();
++        LOG(WARNING) << "Failed to reset setexeccon, continuing anyway";
+     }
+ 
+     if (!fp) {

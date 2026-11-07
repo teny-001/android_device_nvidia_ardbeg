@@ -1,0 +1,93 @@
+--- a/system/vold/Android.mk
++++ b/system/vold/Android.mk
+@@ -21,6 +21,58 @@
+ endif
+ 
+ common_cflags += -Werror
++
++# [修改 2026-10-28] GCC 4.8 下放宽两个"缺少声明"类诊断
++#
++# 报错原文（编译 libminivold 时，libminivold 被 recovery 的 minivold 用到）：
++#     system/vold/Volume.cpp:153:7: error: no previous declaration for
++#         'char* getFsType(const char*)' [-Werror=missing-declarations]
++#     system/vold/main.cpp:45:16: error: no previous declaration for
++#         'int vold_main()' [-Werror=missing-declarations]
++#     system/vold/cryptfs.c:737:6: error: no previous prototype for
++#         'convert_key_to_hex_ascii' [-Werror=missing-prototypes]
++#     cc1plus: all warnings being treated as errors
++#
++# 原因：
++#   这两个诊断本身在 GCC 4.4/4.6 时代是"显式开才有"的选项，AOSP 4.4 的代码
++#   完全没按它们清理过（大量 .cpp 里的辅助函数直接定义、不写前置声明）。
++#   我们用的交叉编译器是 GCC 4.8，这两类诊断被更积极地触发，
++#   再叠加本文件第 23 行**自己**加的 -Werror，就全变成硬错误了。
++#
++#   注意这不是"代码有 bug"：getFsType / vold_main / convert_key_to_hex_ascii
++#   都是本编译单元内部用的函数，没有前置声明在 C/C++ 里完全合法
++#   （-Wmissing-declarations 只是风格检查）。
++#
++# 为什么写在 LOCAL_CFLAGS 里就够：
++#   build/core/definitions.mk:935-955 的 transform-cpp-to-o 模板里，
++#   参数顺序是
++#       $(PRIVATE_TARGET_GLOBAL_CFLAGS) ... $(PRIVATE_CFLAGS) ...
++#   而 PRIVATE_CFLAGS 就是 LOCAL_CFLAGS（binary.mk:732）。
++#   也就是说这里的 -Wno-xxx 出现在命令行**更靠后**的位置，
++#   能覆盖掉全局 CFLAGS 里的同名 -W 选项。
++#
++# 为什么不用 -Wno-error=xxx：
++#   因为这两个诊断不是被某个 -Werror=xxx 单独提升的，而是被上一行那句
++#   笼统的 -Werror 提升的；-Wno-error=xxx 写在 -Werror 之前会被它覆盖，
++#   写在之后又改不了全局 CFLAGS 里已经开着的警告。直接把警告关掉最干净。
++#
++# [修正 2026-10-28 第二版] 两个选项必须分开放，不能都塞进 common_cflags：
++#   -Wno-missing-declarations  C 和 C++ 都认，放 common_cflags 没问题；
++#   -Wno-missing-prototypes    **只对 C 有效**。放进 common_cflags 会同时
++#     出现在 C++ 编译命令行上，而 GCC 4.8 对"选项不适用于当前语言"这件事
++#     本身也报诊断，再被 -Werror 一提，就变成：
++#         cc1plus: error: command line option '-Wno-missing-prototypes'
++#             is valid for C/ObjC but not for C++ [-Werror]
++#         make: *** [.../libminivold_intermediates/Volume.o] Error 1
++#     （注意 -Wmissing-prototypes 只会产生 warning 不会被提升，
++#       但 -Wno-missing-prototypes 在 C++ 下**会**被提升成 error，很不对称。）
++#   所以 C 专用的那个放进 LOCAL_CONLYFLAGS —— build/core/definitions.mk:987
++#   只在编译 .c/.s 时才把它拼进命令行（PRIVATE_CONLYFLAGS），C++ 看不到。
++#
++#   另外实测确认：-Wno-missing-declarations 压不住 C 里的
++#   -Wmissing-prototypes（两者是独立选项），所以 C 那边必须单独关。
++common_cflags += -Wno-missing-declarations
++common_conlyflags := -Wno-missing-prototypes
+ 
+ common_src_files := \
+ 	VolumeManager.cpp \
+@@ -81,6 +133,7 @@
+ LOCAL_C_INCLUDES := $(common_c_includes)
+ LOCAL_SHARED_LIBRARIES := $(common_libraries) libcrypto
+ LOCAL_CFLAGS := $(common_cflags)
++LOCAL_CONLYFLAGS := $(common_conlyflags)
+ LOCAL_MODULE_TAGS := eng tests
+ include $(BUILD_STATIC_LIBRARY)
+ 
+@@ -89,6 +142,7 @@
+ LOCAL_SRC_FILES := vold.c
+ LOCAL_C_INCLUDES := $(common_c_includes)
+ LOCAL_CFLAGS := $(common_cflags)
++LOCAL_CONLYFLAGS := $(common_conlyflags)
+ 
+ ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
+ LOCAL_C_INCLUDES += device/qcom/common/cryptfs_hw
+@@ -114,6 +168,7 @@
+ LOCAL_SRC_FILES := $(common_src_files)
+ LOCAL_C_INCLUDES := $(common_c_includes)
+ LOCAL_CFLAGS := $(common_cflags) -DMINIVOLD -DHELPER_PATH=\"/sbin/\"
++LOCAL_CONLYFLAGS := $(common_conlyflags)
+ LOCAL_MODULE_TAGS := optional
+ include $(BUILD_STATIC_LIBRARY)
+ 
+@@ -122,6 +177,7 @@
+ LOCAL_SRC_FILES := vold.c
+ LOCAL_C_INCLUDES := $(common_c_includes)
+ LOCAL_CFLAGS := $(common_cflags) -DMINIVOLD
++LOCAL_CONLYFLAGS := $(common_conlyflags)
+ LOCAL_STATIC_LIBRARIES := libminivold
+ LOCAL_STATIC_LIBRARIES += libc libstdc++
+ LOCAL_STATIC_LIBRARIES += $(common_libraries) $(common_static_libraries)
