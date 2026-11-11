@@ -41,7 +41,26 @@ PRODUCT_BUILD_PROP_OVERRIDES += \
     PRODUCT_NAME=ardbeg \
     TARGET_DEVICE=ardbeg
 
-# 声明 Leanback（部分 TV 应用会读），但产品特性仍是 tablet
+# ---------------------------------------------------------------------------
+# 【注意】声明 Leanback 不只是"给 TV 应用看的标记"，它会**改掉 UI 模式**
+#
+#   UiModeManagerService 的判据是
+#       mTelevision = pm.hasSystemFeature(FEATURE_TELEVISION)
+#                  || pm.hasSystemFeature(FEATURE_LEANBACK)
+#   一旦为 true，Configuration.uiMode 就是 UI_MODE_TYPE_TELEVISION，
+#   于是 Recents.start() 走 RecentsTvImpl -> RecentsTvActivity（TV 版最近任务），
+#   而不是平板/手机版的 RecentsImpl。
+#
+#   本机没有 android.software.picture_in_picture，TV 版最近任务里对
+#   PipManager 的依赖（getRecentsFocusedPipBounds / getPipRecentsOverlayManager）
+#   因此拿不到对象，2026-11-09 实测按「最近任务」直接把 SystemUI 崩掉，
+#   连带 ImageWallpaper 一起死、壁纸被 WallpaperManagerService 删掉，
+#   桌面变成永久纯黑（详见 README 第五章「桌面黑屏」一条）。
+#
+#   已经用 patches/.../PipUI.java.patch 让 PipManager 无条件 initialize 修好了，
+#   所以这里继续保留 Leanback 声明（TV 版应用需要它）。如果哪天要去掉 TV 形态，
+#   删掉下面这行即可 —— 但请同时确认 Recents 能回到 RecentsImpl。
+# ---------------------------------------------------------------------------
 PRODUCT_COPY_FILES += \
     device/nvidia/ardbeg/permissions/android.software.leanback.xml:system/etc/permissions/android.software.leanback.xml
 

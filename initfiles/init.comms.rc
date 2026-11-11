@@ -36,10 +36,26 @@ on boot
     chown bluetooth net_bt_stack /sys/class/rfkill/rfkill0/type
 
     # bluetooth MAC address programming
+    #
+    # 【不要 setprop ro.bt.bdaddr_path】
+    #   ro.* 是"写一次"属性。system.prop 里已经有
+    #       ro.bt.bdaddr_path=/mnt/factory/bluetooth/bt_mac.txt
+    #   它在 on post-fs 的 load_system_props 阶段就写进 build.prop 了，早于本段，
+    #   所以这里再设一次必然失败，每次开机固定报一行：
+    #       init: property_set("ro.bt.bdaddr_path", "...") failed
+    #   实测 getprop ro.bt.bdaddr_path 取到的正是 build.prop 的值，功能无缺失。
+    #
+    # 【另注：蓝牙 MAC 本身也拿不到工厂值】
+    #   本机 /mnt/factory（FCT 分区）挂载正常但**是空的**，只有 lost+found，
+    #   所以 bt_mac.txt 本来就不存在。这是工厂分区数据缺失，不是软件问题，
+    #   改策略/改 rc 都补不回来。
+    #
+    #   chown ... ro.bt.bdaddr_path 这一行同理是 4.4 时代遗留：它作用的
+    #   /ro.bt.bdaddr_path 从来不存在，是个 no-op，保留不动。
     chown bluetooth net_bt_stack ro.bt.bdaddr_path
     chown bluetooth net_bt_stack /system/etc/bluetooth
     chown bluetooth net_bt_stack /mnt/factory/bluetooth/bt_mac.txt
-    setprop ro.bt.bdaddr_path "/mnt/factory/bluetooth/bt_mac.txt"
+    # setprop ro.bt.bdaddr_path "/mnt/factory/bluetooth/bt_mac.txt"
 
 #ozwpan driver: WiFi direct USB shim driver
     chown system system /dev/ozwpan

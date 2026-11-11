@@ -1,0 +1,137 @@
+# ============================================================================
+# zz-ardbeg-fps-match.rc —— 帧率匹配守护进程的启动单元
+#
+# 对应脚本：/system/bin/ardbeg_fps_match.sh（源文件 initfiles/ardbeg_fps_match.sh）
+#
+# ============================================================================
+# 【它做什么】（2026-11-11 按真实 App 实测更正，旧版「25/24/30 逐档映射」已作废）
+#
+#   常驻读 dumpsys media.player 的 numFramesTotal 累计增量，测出当前片源
+#   真实帧率，再做**区间分类**（不是逐档查表）：
+#       实测 22.00~27.50fps（24/25 类，60Hz 上吃 3:2 pulldown）-> 50Hz
+#       其余（含 30/50/60fps）                                  -> 保持 60Hz
+#       没有视频解码器                                          -> 回到 60Hz
+#
+#   为什么不再「测到 25fps 就固定切 50Hz」：CIBN/优酷实测同一段观看里
+#   片前广告约 25fps、正片约 30.13fps（numFramesTotal 15 秒 +452 帧）。
+#   30fps 在 60Hz 上本来就是 2:2，切 50Hz 反而变成 5:3 pulldown，
+#   比不切更差。所以自动模式只认 22.00~27.50 这一段，30fps 一律不切。
+#   另：在线 App 有多个同名 SurfaceView 层、层会增删，--latency 按名字
+#   只匹配第一个，切到 50Hz 后刷新周期行还会变 20ms 被误判成 50fps，
+#   所以改用解码器侧累计帧数，与显示刷新率完全解耦。
+#
+#   为什么需要：本机 HDMI 只有 60Hz 一档在用，25fps 片源在 60Hz 上必然
+#   3:2 pulldown（每帧显示 2 或 3 个 vsync 交替），数学上除不尽，抖动是
+#   必然的。切到 50Hz 后每帧正好 2 个 vsync，抖动消失。
+#   完整原理、两步顺序、区间分类的容差推导、以及为什么要自加 binder
+#   命令 1040，都写在 ardbeg_fps_match.sh 的文件头注释里。
+#
+# ============================================================================
+# 【开关：默认关闭】
+#
+#   persist.ardbeg.fps_match
+#       0（system.prop 里的默认值）= 服务常驻，但脚本停在「待机」分支，
+#                                    不 dumpsys、不读 sysfs、不写 fb0
+#       1                          = 真正开始自动匹配
+#
+#   ★ 2026-11-11 补记：服务是**常驻**的，不会在开关关闭时退出。
+#     旧版 watch_loop() 在 prop != 1 时 `return 0`，而 init 对非 oneshot
+#     服务是「退出即重启」（system/core/init/service.cpp:96-124 Reap），
+#     刷机后实测 init.svc.ardbeg_fps_match=restarting、每 5 秒一轮、
+#     dmesg 刷满 "Starting service ... / exited with status 0"。
+#     现在改为常驻待机（详见脚本 IDLE_INTERVAL 处补记 #2），
+#     所以运行时只需 setprop，不需要 stop/start：
+#         setprop persist.ardbeg.fps_match 1    # 5 秒内自动开始
+#         setprop persist.ardbeg.fps_match 0    # 5 秒内停止并回到 60Hz
+#
+#   为什么默认 0（效果已验证，但仍有代价）：
+#     2026-11-10 本地 25fps 测试片实测：60Hz 上渲染端请求的上屏时刻
+#     只有 84.7% 落在理想 40ms（12.4% 跳过一帧，std 22.46ms）；
+#     切到 50Hz 后 94.5% 落在 40ms（跳帧 4.4%，std 11.93ms）。
+#     2026-11-11 真实 App（CIBN/优酷）广告期实测 22.66~26.61fps，
+#     auto 能正确切到 50Hz；注入 30fps 窗口则保持 60Hz。
+#
+#     【2026-11-11 已加三层保险，旧注释里「等滞回策略」那条已解决】
+#       1) WATCH_STABLE_NEED=3 + >=4 秒测量窗口：连续约 10 秒同帧率才动作
+#       2) MIN_PLAY_SEC=10：起播不足 10 秒（短视频）不切
+#       3) MIN_DWELL_SEC=20：切过一次后 20 秒内不再切，挡住
+#          广告<->正片帧率跳变时反复重同步 HDMI
+#
+#     仍然默认 0 的原因：每次切 HDMI 时序电视都要黑一下重新同步
+#     （有的还会弹 "1920x1080 50Hz" 角标），这个代价由使用者自己权衡；
+#     且自动模式只切 50Hz 这一档，未做长时间观感对照。
+#     24Hz 自动切换已明确放弃（本机 1080p 无 48Hz，24Hz 会把整个
+#     UI 拖到 24fps），想要 24p 用 `match 24` 手动切。
+#
+#   persist.* 可以 setprop，ro.* 不行，所以开关用 persist。
+#   【2026-11-11】服务常驻后不再需要 stop/start —— 旧版那三行已删除，
+#   开关由脚本自己每 IDLE_INTERVAL 秒轮询一次，见脚本补记 #2。
+#
+#   手动单次验证不需要开这个开关，直接跑脚本子命令即可：
+#       ardbeg_fps_match.sh status
+#       ardbeg_fps_match.sh detect
+#       ardbeg_fps_match.sh apply 50
+#
+# ============================================================================
+# 【为什么用 late_start 而不是 post-fs】
+#
+#   脚本干活要用到三样东西，都必须等系统起来：
+#     1) surfaceflinger 进程（binder 服务 SurfaceFlinger 要能连上）
+#     2) dumpsys（在 /system/bin，class core 阶段就有了，但 dumpsys 要
+#        能查到 SF 才行）
+#     3) HDMI 的 EDID（fb0/modes 有内容），这个要等 HDMI 驱动完成
+#        hotplug 探测，通常比 SF 还晚
+#   所以挂 on property:sys.boot_completed=1 最稳，不用自己 sleep 等。
+#   代价是开机后约 45 秒才开始工作 —— 对本功能完全可接受，
+#   反正开机动画和桌面不需要帧率匹配。
+#
+#   对比：sf_hwc_off.sh 用 on post-fs 是因为它必须赶在 SF 出第一帧之前
+#   把 HWC 关掉，晚了就会崩（厂商 glcomposer 的野指针，见那个脚本）。
+#   两者时机需求正好相反，不要照抄。
+#
+# ============================================================================
+# 【和 sf_hwc_off.sh 的关系】
+#
+#   互不依赖。sf_hwc_off 关的是「谁来合成」（HWC -> GLES），
+#   本服务改的是「多久合成一次」（刷新率）。
+#   因为 HWC 合成被关了，画面由 SF 自己 GLES 合成后整屏送出，
+#   刷新率完全由 DispSync 决定，1040 的效果非常直接。
+#   本功能的效果是在 ro.ardbeg.sf_hwc_off=1 的前提下验证的。
+# ============================================================================
+
+service ardbeg_fps_match /system/bin/sh /system/bin/ardbeg_fps_match.sh watch
+    class late_start
+    user root
+    group root system
+    # 【2026-11-11 新增：显式 seclabel，消掉 init 的 SELinux 域告警】
+    #   刷机后 dmesg 每 5 秒一条：
+    #     init: Service ardbeg_fps_match does not have a SELinux domain defined.
+    #   成因（system/core/init/service.cpp:347-380 ComputeContext）：
+    #     args_[0] 是 /system/bin/sh，其 file context 是 shell_exec:s0，
+    #     原厂 4.4.4 的 /sepolicy 里没有 init -> shell_exec 的
+    #     process transition 规则，security_compute_create() 于是返回 init
+    #     自己的域 u:r:init:s0，即 scon == mycon，init 就打这条告警；
+    #     Permissive 下只是继续用 mycon 启动（不致命），但服务每被拉起
+    #     一次就刷一条 —— 和上面的 restarting 循环叠加才变成刷屏。
+    #   写死 seclabel 让 init 走 347-348 行的短路分支，不再调用
+    #   security_compute_create()，告警彻底消失。选 u:r:init:s0 的理由与
+    #   本目录 zz-persist-log.rc 完全一致：旧 policy 里确实存在、权限最宽、
+    #   语义上就是「不切域」；脚本本来也跑在 init 域，行为没有任何变化。
+    #   （注意 setexeccon 失败会 _exit(127) 让服务起不来，所以必须选策略里
+    #     真实存在的域，不能凭空编一个 ardbeg_fps_match 域。）
+    #   对照组：audioserver / cameraserver / mediacodec / mediaextractor /
+    #   lmkd 这几个 rc 用 mediaserver:s0，是因为它们的可执行文件是 7.1
+    #   新增标签（旧 policy 不认识，security_compute_create 直接返回 -1），
+    #   与本服务「能算出来但算出自己」的情况不同，别照抄。
+    seclabel u:r:init:s0
+    # disabled + 下面 on property 显式 start：
+    #   不写 disabled 的话它会跟着 class late_start 自动起，
+    #   但我们希望等 boot_completed，所以自己控制时机。
+    # 【不写 oneshot】脚本是看门狗语义，真崩了仍希望 init 拉起；
+    #   且它现在常驻不退出，「退出即重启」的循环已不复现（补记 #2）。
+    #   反过来若写 oneshot，persist 属性在 post-fs-data 早期载入时触发
+    #   start 会抢在 boot_completed / HDMI EDID 就绪之前，反而有风险。
+    disabled
+
+on property:sys.boot_completed=1
+    start ardbeg_fps_match

@@ -10,7 +10,7 @@
 #       allow wifi_loader ... （二十多条）
 #
 #   但 7.1 的 BOARD_SEPOLICY_DIRS（BoardConfig.mk 第 199~202 行）已经包含
-#       device/nvidia/shield-common/sepolicy/common
+#       device/nvidia/ardbeg/shield-common/sepolicy/common
 #   而这个目录下的 wifi_loader.te 里有**更完整**的同名定义 —— 它是 NVIDIA
 #   2016 年为 7.1 更新的版本，比 4.4 那份多了：
 #       set_prop(wifi_loader, system_prop)

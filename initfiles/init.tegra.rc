@@ -25,7 +25,20 @@ on init
 
     export EXTERNAL_STORAGE /storage/emulated/legacy
     export EMULATED_STORAGE_SOURCE /mnt/shell/emulated
-    export EMULATED_STORAGE_TARGET /storage/emulated
+    # 【不要导出 EMULATED_STORAGE_TARGET】
+    #   art/runtime/runtime.cc:716 的 Runtime::InitZygote() 见到这个变量就会挂
+    #   一个 staging tmpfs：
+    #       mount("tmpfs", "/storage/emulated", "tmpfs", MS_NOSUID|MS_NODEV, ...)
+    #   那是 4.4.4 的旧存储模型（/storage/emulated 是 init 建的普通目录）。
+    #   7.1 换成新模型：/storage 是 /mnt/runtime/default 的 bind 挂载（底下是
+    #   /mnt 这块 tmpfs），/storage/emulated 由 vold 建好再挂 fuse。zygote 起来时
+    #   该路径还没就绪，mount 返回 ENOENT，InitZygote() 直接返回 false：
+    #       E art: Failed to mount tmpfs to /storage/emulated: No such file or directory
+    #       W art: CreateJavaVM failed
+    #       E AndroidRuntime: JNI_CreateJavaVM failed
+    #   于是 zygote 无限重启，系统永远起不来（实测 2026-11-09）。
+    #   全树只有 art 这一个消费者，不导出不影响其它组件。
+    # export EMULATED_STORAGE_TARGET /storage/emulated
     export SECONDARY_STORAGE /storage/sdcard1
 
     # Support legacy paths

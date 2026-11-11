@@ -1,0 +1,38 @@
+--- a/frameworks/native/services/surfaceflinger/DisplayHardware/HWComposer_hwc1.cpp
++++ b/frameworks/native/services/surfaceflinger/DisplayHardware/HWComposer_hwc1.cpp
+@@ -545,6 +545,35 @@
+ nsecs_t HWComposer::getRefreshPeriod(int disp) const {
+     size_t currentConfig = mDisplayData[disp].currentConfig;
+     return mDisplayData[disp].configs[currentConfig].refresh;
++}
++
++/*
++ * 【ardbeg 帧率匹配 2026-11-10】见头文件里 setRefreshPeriod 的说明。
++ *
++ * 只改 mDisplayData 里那份缓存，完全不碰厂商 HWC —— 厂商那边改不动
++ * （它不看 DC 模式），而且我们也不需要它知道：DispSync 的周期由
++ * SurfaceFlinger 自己持有，跟厂商无关。
++ *
++ * 注意 currentConfig 是 size_t，queryDisplayProperties() 在取不到
++ * activeConfig 时会把它设成 0；configs 为空说明这个显示还没被查询过
++ * （未连接），这两种情况都直接返回，不要越界。
++ */
++void HWComposer::setRefreshPeriod(int disp, nsecs_t period) {
++    if (disp < 0 || disp >= MAX_HWC_DISPLAYS) {
++        ALOGE("%s: bad display %d", __FUNCTION__, disp);
++        return;
++    }
++    DisplayData& d(mDisplayData[disp]);
++    if (d.configs.isEmpty()) {
++        ALOGE("%s: display %d has no configs yet", __FUNCTION__, disp);
++        return;
++    }
++    if (d.currentConfig >= d.configs.size()) {
++        ALOGE("%s: display %d currentConfig %zu out of range (%zu configs)",
++                __FUNCTION__, disp, d.currentConfig, d.configs.size());
++        return;
++    }
++    d.configs.editItemAt(d.currentConfig).refresh = period;
+ }
+ 
+ android_color_mode_t HWComposer::getColorMode(int disp) const {

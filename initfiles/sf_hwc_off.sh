@@ -3,43 +3,99 @@
 # sf_hwc_off.sh —— 让 SurfaceFlinger 永久关闭 HWC 合成（改走 GLES）
 #
 # 【这个脚本解决什么问题】
-#   本机用的是 g100 原厂 Android 4.4.4 的 hwcomposer.tegra.so，跑在
-#   CM14.1(Nougat 7.1.2) 的 SurfaceFlinger 里。两代的 hwc_layer_1_t 虽然
-#   都被 padding 到 96 字节（步长一致，不越界），但字段偏移从 offset 16
-#   开始整体错位 4 字节：
 #
+# ★★ 2026-11-10 复核：本段最初的推断已被实测推翻，原文保留在
+#    git 历史与 README 里，这里改写为结论，避免后人照着错的前提改代码。
+#
+# 原始推断（错误）
+#   认为 4.4.4 的 hwc_layer_1_t 在 offset 16 有一个独立于 handle 的
+#   buffer 指针，7.1 把它并进了 union，于是 transform 之后整体错位 4 字节，
+#   厂商 HWC 按 4.4.4 偏移读 7.1 的数组，把 visibleRegionScreen.numRects
+#   当 rects 指针解引用、把 releaseFenceFd 写到 planeAlpha 上，踩坏堆。
+#
+# 实测结论（正确）：两版在 0~72 偏移上逐字段完全一致，sizeof 都是 96
 #       字段                  4.4.4     7.1
 #       --------------------  -----     -----
 #       compositionType          0         0
 #       hints                    4         4
 #       flags                    8         8
-#       handle                  12        12
-#       buffer                  16        (无，被 transform 顶替)
-#       transform               20        16
-#       blending                24        20
-#       sourceCrop              28        24
-#       displayFrame            44        40
-#       visibleRegionScreen     60        56
-#       acquireFenceFd          68        64
-#       releaseFenceFd          72        68
+#       handle                  12        12      <-- 4.4.4 没有 buffer 字段
+#       transform               16        16
+#       blending                20        20
+#       sourceCrop              24        24
+#       displayFrame            40        40
+#       visibleRegionScreen     56        56
+#       acquireFenceFd          64        64
+#       releaseFenceFd          68        68
+#       planeAlpha              72        72
+#       _pad[3]              73..75    73..75
+#       ---- 76 之后才分叉，且都不影响厂商 ----
+#       4.4.4: reserved[24-19] = 20 字节（"reserved for future use"，
+#              厂商只读不写）
+#       7.1  : surfaceDamage(8) + reserved[96-84] = 12 字节
+#              （surfaceDamage 只给 HWC2 的部分刷新用，4.4.4 厂商从不写）
 #
-#   结果：厂商 HWC 按 4.4.4 的偏移去读 7.1 的 layer 数组，
-#   把 visibleRegionScreen.numRects 读成 rects 指针、
-#   把 acquireFenceFd 读成 rects 指针去解引用，
-#   并且把 releaseFenceFd 写到 7.1 的 planeAlpha/_pad 上，
-#   真正的 releaseFenceFd(offset 68) 永远是未初始化的垃圾。
+# 三条互相独立的证据
+#   1) 直接对照 CM11 源码树（= Android 4.4.4 原文）：
+#      /home/dy/WorkBuddy AI/cm-11.0/hardware/libhardware/include/
+#      hardware/hwcomposer.h —— offset 12 直接就是 handle，没有 buffer。
+#   2) 编译期 offsetof 断言：wb_tmp/chk_hwc_layout.c 逐项验证 7.1 侧布局，
+#      13 条断言全过，与上表吻合。
+#   3) 运行期反证：厂商 HWC 的 dump() 能正确打印每层的 blend/xform/src/dst
+#      （dumpsys SurfaceFlinger 的 "Nvidia HWC" 段）。结构体若错位，
+#      这些值必然是垃圾。实测打印为 blend 0x105 xform 0x0
+#      src(0,0,1920,1080) dst(0,0,1920,1080)，完全正确。
 #
-#   实测后果（logcat -b crash）：
-#     F libc : Fatal signal 11 (SIGSEGV), fault addr 0x8
-#     #00 pthread_mutex_lock+1
-#     #01 je_tcache_bin_flush_large+132
-#     #03 je_malloc+762
-#     #04 operator new
-#     #05 libsurfaceflinger.so
-#   也就是 jemalloc 的堆被写坏，然后在某次 malloc 时炸掉。
-#   SF 每 40~100 秒崩一次，而且**崩一次就永久黑屏**：
-#   所有客户端的 BufferQueue 变成孤儿，框架层没有"SF 重启了"的通知，
-#   WMS 不会重建 Surface，窗口层级完好但每个 Layer 都没有 buffer。
+# 同样被推翻的还有「SF 每 40~100 秒崩一次」
+#   /data/tombstones 里从头到尾**没有一条 surfaceflinger 的 tombstone**
+#   （SF 是原生进程，真段错误必留 tombstone）。当时看到的黑屏其实是
+#   com.cyanogenmod.trebuchet 的 RenderThread 抛 EGL_BAD_NATIVE_WINDOW
+#   （tombstone_07~09），是画面已经坏掉之后的**结果**，不是 SF 崩了。
+#
+# 但「必须关掉厂商合成」这个结论**仍然成立**，只是原因完全不同
+#
+#   2026-11-10 第二轮实测：把 SurfaceFlinger 里另外三个也会触发 skip 的
+#   标志一起清零（命令 1014 daltonize / 1015 colorMatrix / 1030 secondary），
+#   使 layer 的 flags 从 0x0001 变成 0x0000，厂商 HWC 立刻从
+#       Compositor: surfaceflinger (override)
+#   变成
+#       Compositor: glcomposer
+#   也就是它开始真的自己合成了 —— 然后 SurfaceFlinger 当场 SIGSEGV，
+#   pid 从 257 变成 20252，Visible layers 归 0，screencap 只剩 10 KB
+#   （永久黑屏，所有客户端 BufferQueue 变孤儿）。
+#
+#   崩溃栈（logcat -b crash，这是本项目第一次拿到 SF 的真实 tombstone）：
+#       signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0xc
+#       #00 libutils.so          android::RefBase::decStrong+37
+#       #01 hwcomposer.tegra.so  android::sp<GraphicBuffer>::operator=+22
+#       #02 hwcomposer.tegra.so  destroy_graphic_buffer+8
+#       #03 hwcomposer.tegra.so
+#       #04 hwcomposer.tegra.so  glc_set+1096
+#       #05 hwcomposer.tegra.so  hwc_composite_set+252
+#       #06 hwcomposer.tegra.so
+#       #07 libsurfaceflinger.so
+#
+#   即崩在厂商 HWC 自己的 GL 合成器里：destroy_graphic_buffer 对一个
+#   已经释放的 GraphicBuffer 做 sp<> 赋值，decStrong 打到野指针上
+#   （fault addr 0xc 是 RefBase 的引用计数成员偏移）。
+#   这是 4.4.4 厂商 blob 在 7.1 上**内部状态机**不兼容，跟 layer 结构体
+#   的字段布局毫无关系 —— 所以「写个字段翻译 shim」这条路是死路。
+#
+#   结论：厂商的合成路径（persist.tegra.compositor=glcomposer）在本机
+#   一用就崩，必须让它永远不参与合成。做法就是给所有 layer 置
+#   HWC_SKIP_LAYER，让厂商只处理最后那一个 HWC_FRAMEBUFFER_TARGET。
+#   本脚本正是干这个的，**不可省略**。
+#
+#   ★ 顺带发现一个隐藏风险：除了本脚本设的 mDebugDisableHWC，SF 里还有
+#     三个标志会顺带触发同一个 skip 分支（mDaltonize / mHasColorMatrix /
+#     mHasSecondaryColorMatrix，见 SurfaceFlinger_hwc1.cpp:1313）。
+#     也就是说系统平时是"双保险"。一旦有代码路径把颜色矩阵清掉而
+#     mDebugDisableHWC 又恰好是 0，SF 立刻就会崩。
+#     所以 mDebugDisableHWC=1 必须是**主保险**，不能只依赖颜色标志。
+#
+#   开关 ro.ardbeg.sf_hwc_off 仍然保留（默认 1），但把值改成 0 会让
+#   厂商合成路径生效，**会黑屏**。留着它只是为了以后万一修好了
+#   hwcomposer.tegra.so 的 glcomposer 崩溃时，能一行属性切回去验证。
 #
 # 【为什么用 GLES 合成就能躲开】
 #   SurfaceFlinger 有个隐藏的 binder 命令（SurfaceFlinger_hwc1.cpp:3290）：
@@ -63,9 +119,19 @@
 #
 # 【代价】
 #   所有合成都走 GPU，没有硬件 overlay，功耗和带宽会高一些。
-#   Tegra K1 的 GPU 应付 1080p 桌面合成没有问题，实测操作流畅。
-#   等以后写好 hwcomposer shim（做 4.4.4 <-> 7.1 的 layer 字段翻译），
-#   就可以去掉这个脚本、恢复硬件合成。
+#   Tegra K1 的 GPU 应付 1080p 桌面合成没有问题。
+#   注意：**不需要**写什么 "hwcomposer shim 做 layer 字段翻译" ——
+#   字段本来就一致（见上面 2026-11-10 复核）。厂商 HWC 在本机不用
+#   overlay，是它自己的判定（Composite policy: auto + 各 layer 带
+#   HWC_SKIP_LAYER），跟结构体无关。
+#   如果以后想让视频走硬件 overlay 来省 GPU，方向是修
+#   libnvcap_video.so 缺失的符号（见下），而不是翻译 layer 结构体：
+#       E hwcomposer: failed to load libnvcap_video.so: dlopen failed:
+#         cannot locate symbol "_ZN7android12MemoryDealerC1EjPKc"
+#         referenced by "/system/vendor/lib/libnvomxadaptor.so"
+#   7.1 的 libbinder 只导出三参数版
+#   _ZN7android12MemoryDealerC1EjPKcj（多一个 uint32_t flags），
+#   补一个 mov r3,#0 的跳板即可。
 #
 # 【为什么要循环监控】
 #   SF 如果还是崩了（比如 EGL 驱动自身的问题），init 会重启它，
@@ -90,6 +156,36 @@ LOG_TAG="sf_hwc_off"
 log_msg() {
     /system/bin/log -t "$LOG_TAG" "$*" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# 【2026-11-10 新增】总开关：ro.ardbeg.sf_hwc_off
+#
+#   1（默认）= 启动后把 mDebugDisableHWC 置 1，禁止厂商 HWC 参与合成。
+#              这是 2026-11-05 以来一直验证过的稳定配置，保守保留。
+#   0        = 本脚本不干预，SurfaceFlinger 用厂商 HWC 自己判断。
+#              2026-11-10 实测可正常运行，且性能上与 1 无差别
+#              （厂商 HWC 本机不用 overlay，两种设置下都是全 GLES 合成）。
+#
+#   为什么用 ro.* 而不是 persist.*：
+#     persist.* 属性要等 init 执行 on post-fs-data 里的 load_persist_props
+#     才读进属性空间，而本脚本由 zz-sf-hwc-off.rc 的 on post-fs 拉起，
+#     那一刻 persist 属性还是空的，读出来必然是 ""，开关会永远失效。
+#     ro.* 来自 /system/build.prop，在 on init 阶段就已加载完毕，安全。
+#
+#   修改方法（二选一）：
+#     a) 在 device/nvidia/ardbeg/system.prop 里加一行
+#            ro.ardbeg.sf_hwc_off=0
+#        然后重打 OTA 包；
+#     b) 临时验证（需 remount /system 可写）：
+#            mount -o remount,rw /system
+#            sed -i 's/^ro.ardbeg.sf_hwc_off=.*/ro.ardbeg.sf_hwc_off=0/' \
+#                /system/build.prop
+#            reboot
+# ---------------------------------------------------------------------------
+if [ "$(/system/bin/getprop ro.ardbeg.sf_hwc_off)" = "0" ]; then
+    log_msg "ro.ardbeg.sf_hwc_off=0, 不干预 HWC（leave HWC enabled）"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 第一步：等 SurfaceFlinger 的 binder 注册好，然后关掉 HWC 合成

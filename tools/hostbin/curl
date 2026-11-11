@@ -1,0 +1,53 @@
+#!/bin/bash
+# =============================================================================
+# curl 包装脚本 —— 只拦一个域名，其余原样转交给真正的 curl
+#
+# 【为什么需要它】
+#   vendor/cm/vendorsetup.sh 第一行是：
+#       for combo in $(curl -s https://raw.githubusercontent.com/LineageOS/\
+#                      hudson/master/lineage-build-targets | sed -e 's/#.*$//' | ...)
+#   它在 **source 阶段**（也就是每次 . build/envsetup.sh）就会去拉 LineageOS
+#   官方构建目标列表，用来注册 lineage_<device>-<variant> 那组 lunch 目标。
+#
+#   本机直连 raw.githubusercontent.com 不通：TCP 连接既不被拒绝也不返回，
+#   curl 会一直挂到系统默认超时（实测约 2 分钟）。表现是
+#       $ . build/envsetup.sh          # 卡两分钟，一个字都不输出
+#   看起来像构建系统死掉，实际只是在等一个永远不来的连接。
+#
+# 【为什么不在 vendor/cm/vendorsetup.sh 里加 --max-time】
+#   那是源码树里的文件，repo sync 会覆盖，而且本项目约定源码树零改动。
+#   放在设备树 tools/hostbin 下，由 vendorsetup.sh 挂到 PATH 最前面
+#   （device/*/vendorsetup.sh 早于 vendor/*/vendorsetup.sh 被 source，
+#   见 build/envsetup.sh 第 1698 行），既不动源码，又能生效。
+#
+# 【拦截方式】
+#   只匹配 raw.githubusercontent.com 这一个域名，命中就以退出码 7
+#   （CURLE_COULDNT_CONNECT，"连不上"）立即返回，让 $(...) 拿到空串，
+#   for 循环自然一次都不执行。
+#   其余任何参数、任何 URL 一律原样 exec 给真正的 curl，不做任何改写，
+#   所以 repo / git / 下载脚本里的 curl 行为完全不变。
+# =============================================================================
+
+_REAL_CURL=
+for _c in /usr/bin/curl /bin/curl /usr/local/bin/curl; do
+    if [ -x "$_c" ]; then
+        _REAL_CURL=$_c
+        break
+    fi
+done
+if [ -z "$_REAL_CURL" ]; then
+    echo "curl wrapper: 找不到真正的 curl（试过 /usr/bin /bin /usr/local/bin）" >&2
+    exit 127
+fi
+
+for _a in "$@"; do
+    case "$_a" in
+        *raw.githubusercontent.com*)
+            # 快速失败。curl -s 本来就是静默的，这里也不打任何东西，
+            # 免得每次 envsetup 都刷一行无关告警。
+            exit 7
+            ;;
+    esac
+done
+
+exec "$_REAL_CURL" "$@"

@@ -1,0 +1,45 @@
+--- a/frameworks/native/services/surfaceflinger/SurfaceFlinger_hwc1.cpp
++++ b/frameworks/native/services/surfaceflinger/SurfaceFlinger_hwc1.cpp
+@@ -3362,6 +3362,42 @@
+             case 1016: {
+                 n = data.readInt32();
+                 mPrimaryDispSync.setRefreshSkipCount(n);
++                return NO_ERROR;
++            }
++            /*
++             * 【ardbeg 帧率匹配 2026-11-10】1040 <hz>
++             *
++             * 把主显示的刷新率切成 hz。同时更新两处：
++             *   1) HWComposer 里缓存的 refresh 周期
++             *      （厂商永远报 60Hz，所以我们自己写，
++             *        见 HWComposer::setRefreshPeriod）
++             *   2) mPrimaryDispSync 的周期 —— 这才是真正决定
++             *      SurfaceFlinger 什么时候合成一帧、以及发给应用和
++             *      SF 自己的 vsync 间隔的东西
++             *
++             * ★ 调用方必须**先**把 tegra DC 的显示模式切过去：
++             *       echo D:1920x1080p-50 > /sys/class/graphics/fb0/mode
++             *   再调本命令。反了的话 SF 按新周期排帧、硬件还在旧刷新率，
++             *   画面会错拍得更厉害。两步合起来由
++             *   device/nvidia/ardbeg/initfiles/ardbeg_fps_match.sh 负责。
++             *
++             * 用法：service call SurfaceFlinger 1040 i32 50
++             * 验证：dumpsys SurfaceFlinger | grep refresh-rate
++             *       （那行读的就是 getRefreshPeriod，会跟着变）
++             */
++            case 1040: {
++                n = data.readInt32();
++                if (n < 20 || n > 240) {
++                    ALOGE("1040: invalid refresh rate %d Hz", n);
++                    return BAD_VALUE;
++                }
++                const nsecs_t period = 1000000000LL / n;
++                getHwComposer().setRefreshPeriod(HWC_DISPLAY_PRIMARY, period);
++                mPrimaryDispSync.setPeriod(period);
++                ALOGI("1040: primary display refresh -> %d Hz (%" PRId64 " ns)",
++                        n, period);
++                invalidateHwcGeometry();
++                repaintEverything();
+                 return NO_ERROR;
+             }
+             case 1017: {

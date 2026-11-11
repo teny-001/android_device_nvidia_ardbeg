@@ -1,0 +1,38 @@
+--- a/system/sepolicy/Android.mk
++++ b/system/sepolicy/Android.mk
+@@ -99,6 +99,11 @@
+ 		-D target_needs_platform_text_relocations=$(TARGET_NEEDS_PLATFORM_TEXT_RELOCATIONS) \
+ 		-D shipping_build=$(CYNGN_TARGET) \
+ 		-s $^ > $@
++	# 【v28 降级】剥离 xperm 语句：见 device/nvidia/ardbeg/patches/README.md
++	#   内核 POLICYDB_VERSION_MAX=28（xperms 之前），checkpolicy -c 28 拒绝写
++	#   allowxperm/neverallowxperm。这些语句只约束 ioctl 白名单，在 permissive
++	#   下没有实际约束力，剥掉不改变可执行策略的行为。
++	$(hide) awk '/^(allow|auditallow|dontaudit|neverallow)xperm[ \t]/{x=1} x==0{print} x==1&&/;[ \t]*$$/{x=0}' $@ > $@.noxperm && mv $@.noxperm $@
+ 	$(hide) sed '/dontaudit/d' $@ > $@.dontaudit
+ 
+ $(LOCAL_BUILT_MODULE): $(sepolicy_policy.conf) $(HOST_OUT_EXECUTABLES)/checkpolicy $(HOST_OUT_EXECUTABLES)/sepolicy-analyze
+@@ -139,6 +144,11 @@
+ 		-D target_recovery=true \
+ 		-D target_needs_platform_text_relocations=$(TARGET_NEEDS_PLATFORM_TEXT_RELOCATIONS) \
+ 		-s $^ > $@
++	# 【v28 降级】剥离 xperm 语句：见 device/nvidia/ardbeg/patches/README.md
++	#   内核 POLICYDB_VERSION_MAX=28（xperms 之前），checkpolicy -c 28 拒绝写
++	#   allowxperm/neverallowxperm。这些语句只约束 ioctl 白名单，在 permissive
++	#   下没有实际约束力，剥掉不改变可执行策略的行为。
++	$(hide) awk '/^(allow|auditallow|dontaudit|neverallow)xperm[ \t]/{x=1} x==0{print} x==1&&/;[ \t]*$$/{x=0}' $@ > $@.noxperm && mv $@.noxperm $@
+ 
+ $(LOCAL_BUILT_MODULE): $(sepolicy_policy_recovery.conf) $(HOST_OUT_EXECUTABLES)/checkpolicy $(HOST_OUT_EXECUTABLES)/sepolicy-analyze
+ 	@mkdir -p $(dir $@)
+@@ -175,6 +185,11 @@
+ 	$(hide) m4 -D mls_num_sens=$(PRIVATE_MLS_SENS) -D mls_num_cats=$(PRIVATE_MLS_CATS) \
+ 		-D target_build_variant=user \
+ 		-s $^ > $@
++	# 【v28 降级】剥离 xperm 语句：见 device/nvidia/ardbeg/patches/README.md
++	#   内核 POLICYDB_VERSION_MAX=28（xperms 之前），checkpolicy -c 28 拒绝写
++	#   allowxperm/neverallowxperm。这些语句只约束 ioctl 白名单，在 permissive
++	#   下没有实际约束力，剥掉不改变可执行策略的行为。
++	$(hide) awk '/^(allow|auditallow|dontaudit|neverallow)xperm[ \t]/{x=1} x==0{print} x==1&&/;[ \t]*$$/{x=0}' $@ > $@.noxperm && mv $@.noxperm $@
+ 	$(hide) sed '/dontaudit/d' $@ > $@.dontaudit
+ 
+ built_general_sepolicy.conf := $(LOCAL_BUILT_MODULE)

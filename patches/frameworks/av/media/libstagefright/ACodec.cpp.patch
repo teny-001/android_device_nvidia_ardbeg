@@ -1,0 +1,77 @@
+--- a/frameworks/av/media/libstagefright/ACodec.cpp
++++ b/frameworks/av/media/libstagefright/ACodec.cpp
+@@ -7881,16 +7881,69 @@
+     switch (event) {
+         case OMX_EventPortSettingsChanged:
+         {
+-            CHECK_EQ(data1, (OMX_U32)kPortIndexOutput);
++            /*
++             * 【2026-11-10 修改】原来是
++             *     CHECK_EQ(data1, (OMX_U32)kPortIndexOutput);
++             *
++             * 实测命中的组件是 NVIDIA 的 AAC 音频解码器：
++             *     OMX.Nvidia.eaacp.decoder
++             * 它会在播放中（广告切正片、音频流参数变化时）发出一个
++             * data1 = kPortIndexInput(0)、data2 = 0x04000003 的
++             * OMX_EventPortSettingsChanged。原断言只认 kPortIndexOutput，
++             * CHECK_EQ 失败即 abort()，整个 mediaserver 退出。
++             *
++             * 别被线程名误导：崩溃线程叫 "NPDecoder-CL"，但那只是
++             * NVIDIA 所有 OMX 组件共用的工作线程名，不是组件名。
++             * 真正的组件名只看 ACodec 日志里 [%s] 的前缀。
++             *
++             * mediaserver 一死，视频、音频、录音全部跟着挂，代价太大。
++             * 所以这里改成只告警并忽略：
++             *   - 输入端口(kPortIndexInput)的格式是我们自己设的，
++             *     组件再报一次对我们没有意义；
++             *   - 输出端口的变化不会用错误的 data1 来表达。
++             * 宁可少处理一次重配置，也不能让进程退出。
++             *
++             * 验证方法：logcat 里应出现
++             *   W ACodec : [OMX.Nvidia.eaacp.decoder]
++             *              OMX_EventPortSettingsChanged on port 0
++             *              (data2 0x04000003), ignoring
++             * 且不再出现 mediaserver 的 SIGABRT。
++             */
++            if (data1 != (OMX_U32)kPortIndexOutput) {
++                ALOGW("[%s] OMX_EventPortSettingsChanged on port %u "
++                      "(data2 0x%08x), ignoring",
++                      mCodec->mComponentName.c_str(), data1, data2);
++                return true;
++            }
+ 
+             mCodec->onOutputFormatChanged();
+ 
+             if (data2 == 0 || data2 == OMX_IndexParamPortDefinition) {
+                 mCodec->mMetadataBuffersToSubmit = 0;
+-                CHECK_EQ(mCodec->mOMX->sendCommand(
+-                            mCodec->mNode,
+-                            OMX_CommandPortDisable, kPortIndexOutput),
+-                         (status_t)OK);
++
++                /*
++                 * 【2026-11-10 修改】原来这里也是
++                 *     CHECK_EQ(mCodec->mOMX->sendCommand(...), (status_t)OK);
++                 * 组件拒绝关输出端口时同样会 abort 掉 mediaserver。
++                 *
++                 * 改成把错误交给上层（signalError），让 MediaCodec 走
++                 * 错误回调 / 换解码器，进程不退出。
++                 *
++                 * 关键：sendCommand 失败时**不能**继续往下执行
++                 * freeOutputBuffersNotOwnedByComponent() 和
++                 * changeState() —— 此时输出端口的 buffer 归属没有变，
++                 * 继续 free 等于把组件仍持有的 buffer 还给上层，
++                 * 后面必然出现 use-after-free 或重复入队。
++                 */
++                status_t err = mCodec->mOMX->sendCommand(
++                        mCodec->mNode,
++                        OMX_CommandPortDisable, kPortIndexOutput);
++                if (err != OK) {
++                    ALOGE("[%s] failed to disable output port: %d",
++                          mCodec->mComponentName.c_str(), err);
++                    mCodec->signalError(OMX_ErrorUndefined, err);
++                    return true;
++                }
+ 
+                 mCodec->freeOutputBuffersNotOwnedByComponent();
+ 

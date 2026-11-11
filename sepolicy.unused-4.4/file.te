@@ -15,7 +15,7 @@
 
 # 【7.1 移植改动 2026-11-04】下面三个 type 声明被注释掉了。
 #   原因：7.1 的 BOARD_SEPOLICY_DIRS 里同时包含
-#       device/nvidia/shield-common/sepolicy/common
+#       device/nvidia/ardbeg/shield-common/sepolicy/common
 #   而它的 file.te（NVIDIA 2017 年更新的版本，247 行）已经声明了同名 type：
 #       shield-common/sepolicy/common/file.te:61  phsd_socket
 #       shield-common/sepolicy/common/file.te:40  proc_wmem_default_writable

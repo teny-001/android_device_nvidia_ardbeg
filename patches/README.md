@@ -31,6 +31,7 @@
 | `packages/apps/CMParts/Android.mk.patch`                                        | CMParts 构建修正                                                                                                                            |
 | `system/core/init/init.cpp.patch`                                               | 老内核没有 `checkreqprot`，不再 `security_failure()`                                                                                            |
 | `system/core/rootdir/init.rc.patch`                                             | **`symlink /system/lib/egl /egl`，让 4.4.4 的 Tegra GL 库能按相对路径 dlopen**                                                                    |
+| `system/core/rootdir/init.rc.patch`（同文件第 2 个 hunk）          | **去掉 `restorecon_recursive /sys/kernel/debug`**。debugfs 不支持 `security.*` xattr，这条命令 100% 失败且逐文件打日志，一次冷启动 5456 行（占 88%），把内核 ring buffer 冲光。去掉不改变任何行为（见 README 第五章「内核日志可观测性」） |
 | `system/core/rootdir/init.usb.rc.patch`                                         | **补齐 MTP/PTP 的 legacy 规则 + 把 adb 配置提前到 `on init`，修「USB 没有盘符」**（见下）                                                                      |
 | `frameworks/native/opengl/libs/EGL/egl_display.cpp.patch`                       | **去掉 EGL display 的进程级缓存，修应用进程全崩**                                                                                                       |
 | `frameworks/native/services/surfaceflinger/surfaceflinger.rc.patch`             | **去掉 `onrestart restart zygote`，把「SF 崩→整机死」降级为「只 SF 自己重启」**                                                                             |
@@ -46,6 +47,7 @@
 | `system/vold/vold.rc.patch`                                                     | **给 vold 挂垫片，修 `Failed to setexeccon` → SIGABRT 无限重启 → `/data/user_de/0/` 建不出来**（第 3.5 层，见专章）                                           |
 | `frameworks/av/services/mediacodec/mediacodec.rc.patch`                         | **`seclabel u:r:mediaserver:s0`，修 `could not get context while starting 'mediacodec'`**（第 5 层）                                          |
 | `frameworks/av/services/mediaextractor/mediaextractor.rc.patch`                 | **同上，媒体容器解析服务**（第 5 层）                                                                                                                  |
+| `system/sepolicy/Android.mk.patch`                              | **`POLICYVERS=28` 下剥离 xperm 语句**，否则 `checkpolicy` 报 `policy version 28 does not support ioctl extendedpermissions rules`（见专章） |
 
 > **`system/core/rootdir/init.usb.rc.patch` 的补充说明**
 >
@@ -2088,36 +2090,115 @@ snd_timer
 snd_usb_audio
 ```
 
-三条结论：
+三条结论（**2026-11-10 已全部推翻，见下方「复核」**）：
 
-1. **内核里没有 ASoC**。`/sys/module/snd_soc_core` 不存在，  
-   也没有 `snd_soc_rt5639`、没有任何 `snd_soc_tegra*`。  
-   唯一的真实音频通路是 card 0 的 **HDMI**（`00-03: HDMI 0`）。
-2. **`tegra-snd-rt5639` 声卡不存在**，而 `audio.ardbeg.xml` 里的  
-   `<mixer card="tegra-snd-rt5639">` 正是按它写的。所以  
-   `mixer_get_ctl_by_name()` 每条都打 `Control 'xxx' not found`，  
-   路由等于什么都没做。  
-   （`tinymix` 实际列出来的 mixer 是 `HDA NVIDIA Tegra`，9 个控件，  
-   全是 HDMI 的 IEC958 那一套，没有任何 codec 音量控件。）
-3. 因此**扬声器出声在当前预编译内核上做不到** ——  
-   不是 HAL 配置问题，是内核里根本没有 RT5639 的 codec 驱动和机器驱动。
+1. ~~**内核里没有 ASoC**~~ —— 错。`/proc/kallsyms` 里有 `rt5639_*` 全套符号，
+   `/sys/bus/platform/drivers/` 里 `tegra-snd-rt5639`、`tegra-snd-rt5640`、
+   `tegra30-ahub`、`tegra30-i2s`、`tegra30-dam`、`tegra30-spdif`、`soc-audio`
+   全在。
+2. ~~**`tegra-snd-rt5639` 声卡不存在**~~ —— 准确说法是
+   **有 driver 没有 device**：`/sys/bus/platform/devices/` 里只有
+   `tegra-snd-dummy.0`，机器驱动从未被实例化。
+3. ~~**扬声器出声在预编译内核上做不到**~~ —— 内核侧做得到，
+   做不到的是**硬件**：codec 不在总线上。
 
-### 要恢复扬声器，必须做的事（按代价从低到高）
+## 复核（2026-11-10 真机实测）
 
-1. 确认原厂 4.4.4 内核到底有没有编 RT5639。  
-   如果有、只是 DTB 里的 sound 节点不对，那改 DTB 就能救  
-   （但本机没有 `dtc`，且 DTB 在 boot.img 里，要重打包）。
-2. 重新编内核，打开  
-   `CONFIG_SND_SOC_TEGRA_RT5639` / `CONFIG_SND_SOC_RT5639` /  
-   `CONFIG_SND_SOC_TEGRA`，并确认 `tegra124-tn8-p1761-*.dts` 的  
-   `sound` 节点 `nvidia,audio-codec` 指向 rt5639。
-3. HDMI 出声则是另一条路：给 HAL 补一条走 card 0 / device 3 的  
-   `hw_stream`，并让 `audio_policy.conf` 只声明这一条（而不是像原来那样  
-   声明一堆做不到的多声道 profile）。这条路不需要动内核。
+### 一、驱动全在，只是没有设备
 
-**当前选择**：先保证 `audioserver` 不崩（框架健康），音频输出留到  
-内核/DTB 层面解决。一个崩溃循环的 audioserver 比"暂时没声音"糟糕得多 ——  
-它会拖死 `AudioService`，进而让 `MediaPlayer`、铃声、通知全部异常。
+```
+$ ls /sys/bus/platform/drivers/ | grep -E "snd|ahub|i2s|spdif|dam"
+snd-soc-dummy  spdif-dir  spdif-dit  tegra-snd-dummy  tegra-snd-rt5639
+tegra-snd-rt5640  tegra30-ahub  tegra30-dam  tegra30-i2s  tegra30-spdif
+
+$ ls /sys/devices/platform/ | grep -E "i2s|ahub|dam|spdif"
+spdif-dit.0  spdif-dit.1  spdif-dit.2  tegra30-ahub
+tegra30-dam.0  tegra30-dam.1  tegra30-dam.2
+tegra30-i2s.0  tegra30-i2s.1  tegra30-i2s.3  tegra30-i2s.4  tegra30-spdif
+```
+
+`tegra30-i2s.*` / `tegra30-ahub` / `tegra30-spdif` 这些 **CPU DAI 是板级 C 代码
+静态注册的，不依赖 DT**。所以当年裁掉 `/ahub` 节点并没有弄丢它们。
+
+### 二、机器驱动支持 DT，可以纯靠 DTB 实例化
+
+`tegra_rt5639.c` 有 `of_match_table`，compatible = **`nvidia,tegra-audio-rt5639`**。
+probe 读这几个属性（都在真机内核 `vmlinux` 里逐字确认过存在）：
+
+| 属性 | 取值 |
+|---|---|
+| `nvidia,codec_name` | `rt5639.0-001c`（dai_link 里写死的默认值是 `rt5639.0-001a`，板级代码会覆盖） |
+| `nvidia,codec_dai_name` | `rt5639-aif1` |
+| `nvidia,ldo-gpios` | `TEGRA_GPIO_PR2` = 138 |
+| `nvidia,hp-det-gpios` | `TEGRA_GPIO_PH4` = 60（P1761 分支） |
+| `nvidia,i2s-param-hifi` | `<port is_master daifmt>` = `<1 1 2>`，`TEGRA_DAIFMT_I2S` = 2 |
+| `nvidia,i2s-param-bt` | `<3 1 0>`，`TEGRA_DAIFMT_DSP_A` = 0 |
+
+**主线那套属性（`nvidia,model` / `nvidia,audio-codec` / `nvidia,i2s-controller` /
+`nvidia,audio-routing`）在这颗内核里根本不存在** —— 3.10.24 用的是
+platform_data 式 DT 绑定，抄主线 `tegra-audio-rt5640` 的 DTS 会全部落空。
+
+`tegra_asoc_utils_init()` 用 `clk_get_sys(NULL, "pll_a")` 按名字全局取时钟，
+**不需要** DT 里写 `clocks`；但它靠 `of_machine_is_compatible("nvidia,tegra124")`
+判断 SoC，根节点 compatible 必须含 `nvidia,tegra124`（当前是
+`"nvidia,tn8\0nvidia,tegra124"`，满足）。
+
+### 三、DTB 实测：走到 codec probe，然后卡在两处
+
+用 `fdtput` 往 DTB 里加 `/sound`（不重新编译，避免 phandle 重排）后，
+`sound.0` 平台设备确实建出来了，
+`MODALIAS=of:NsoundT<NULL>Cnvidia,tegra-audio-rt5639` 也对，但 probe 失败：
+
+```
+tegra-i2c tegra12-i2c.0: no acknowledge from address 0x1c     ← 反复几十条
+rt5639 0-001c: Failed to set private addr: -121
+tegra30-i2s tegra30-i2s.1: ASoC: pcm constructor failed: -12
+tegra-snd-rt5639 sound.0: ASoC: can't create pcm rt5639 PCM :-12
+tegra-snd-rt5639 sound.0: snd_soc_register_card failed (-12)
+tegra-snd-rt5639: probe of sound.0 failed with error -12
+```
+
+两个互相独立的死结：
+
+1. **codec 不在总线上**。板级代码是
+   `i2c_register_board_info(0, &rt5639_board_info, 1)`，
+   `I2C_BOARD_INFO("rt5639", 0x1c)` —— 地址 i2c-0 @0x1c。芯片**不应答**。
+   ⚠️ 陷阱：`rt5639_i2c_probe` 在 I2C 全 NAK 时**仍然会注册 codec**，
+   `/sys/kernel/debug/asoc/codecs` 里能看到 `rt5639.0-001c`，
+   `/sys/bus/i2c/devices/0-001c/driver` 也有 symlink，`rt5639-aif1` 也出现在
+   `dais` 里 —— **看起来像成功，其实全是假的**。判断 codec 真在位的唯一标准是
+   `dmesg` 里有没有 `no acknowledge from address 0x1c`。
+2. **i2s DMA 分配失败**：`coherent DMA mask 0xffffffff is smaller than
+   system GFP_DMA mask 0xffffffffffffffff` → `pcm constructor failed: -12`
+   （`-ENOMEM`）。这条与 DT 无关，是内核 DMA 域的问题
+   （`tegra30-i2s.3` 挂 dummy 卡却能建 PCM，`.1` 不行，差异未查清）。
+
+### 四、结论：这台机器没有模拟音频 codec
+
+硬件事实。改 DTB / 改 HAL / 重编内核都改变不了。
+
+- 2026-10-23 那次 `I2C_SLAVE_FORCE` 全总线扫描（0x03~0x77）的结论是对的：
+  RT5639(0x1a/0x1c)、RT5640(0x1c)、TFA9887(0x34~0x36) 在六条总线上全部 NAK。
+- 2026-11-10 用 `/sys/bus/i2c/devices/i2c-0/new_device` 再验一次，仍然 NAK。
+
+**唯一可能有声的出口是 HDMI**：card 0 = `HDA NVIDIA Tegra`，`pcmC0D3p`。
+但 `audio.primary.ardbeg.so`（tinyhal）的 `device_table[]` 里没有
+`AUDIO_DEVICE_OUT_AUX_DIGITAL`，而且输出设备硬编码成 `/dev/snd/pcmC0D0p`
+（每次开机刷 `pcm_open(out) failed`）。要走 HDMI 必须改 HAL 源码 +
+`audio_policy.conf`，不是改配置能解决的。
+
+### 五、顺带确认：`nvidia,boardids` 对音频没有影响
+
+`/proc/cmdline` 里有 `board_info=0x06e1:0x0000:0x00:0x00:0x00`
+（bootloader 直接给），`tegra_get_board_info()` 优先用它。
+往 DTB 根节点补 `nvidia,boardids = "1761:1470:0"` 后，
+`/proc/device-tree/nvidia,boardids` 读得到，但**行为零变化**。
+以后不要再往这个方向试。
+
+**当前状态（2026-11-10 收尾）**：DTB 已恢复成实验前那份
+（整分区 md5 `f78c0268beea0a815304f1a63dd326e8`），
+`/proc/asound/cards` 仍是 `HDA NVIDIA Tegra` + `tegradummy` 两张。
+这个方向不再投入。
 
 ---
 
@@ -6562,3 +6643,48 @@ H.264 `makeComponentInstance(OMX.Nvidia.h264.decode)` → `NvMMLiteOpen` →
 - `libnvomxadaptor.so` 的 `MemoryDealer` 符号缺口只影响 capture /
   hwcomposer 路径，不影响本轮验证的 H.264 / H.265 解码。
 
+
+
+## 21. 2026-11-12 验收体系固化：把 check.sh 对齐到当前构建链路
+
+### 21.1 背景：改动其实早已固化，错的是验收判据
+
+`device/nvidia/ardbeg` 的 15 个提交、29 个 patch 全部已应用，真机刷入的
+`5002791a80`（2026-11-11 21:50，`make otapackage` 产物）里 4 个关键脚本与
+设备树真源 md5 逐字节一致。但 `check.sh` / `_common.sh` 仍停留在 11-07 的
+「TV 产品 + 文件级 overlay 重打包」时代，`./check.sh` 会报出一串与现状
+无关的 `[错误]`，造成「改动没固化」的错觉。
+
+### 21.2 三处根因与修复
+
+| # | 现象 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | `gen_flash_blocks.py` / `verify_six_layers.py` 报「语法检查失败」 | `find_python()` 只判 `-x`，选中了缺动态 loader 的 `prebuilts/python/linux-x86/2.7.5/bin/python2.7`，`py_compile` rc=127 | 新增 `_py_can_run()` 真实执行探测；系统 `python3` 优先，源码树 `python2.7` 降为兜底且同样要过探测 |
+| 2 | OTA 段报「条目数 1 < 17 / 缺 install/bin / 缺签名件 / testzip 损坏」 | 选包写死 `dist/*/cm_ardbeg_tv-ota-eng.dy.zip`，永远拿 1107 那份旧实验包 | 候选合并 `out/target/product/ardbeg/cm_ardbeg-ota-*.zip`，按 mtime 取最新；17 条目判据对标准 otapackage 产物同样适用 |
+| 3 | 报「包内 build.prop 没有 persist.sys.ui.hw=0，这是 HWUI 黑屏根因」 | 该属性是 `lineage_tv.mk`（TV 产品）专属；当前 `cm_ardbeg-eng`（`lineage.mk`，tablet 产品）不 inherit 它 | 判据按产品自适应：含 `ro.ardbeg.sf_hwc_off=1` 时改验 `persist.ardbeg.fps_match` / `persist.ardbeg.gpu_video`；TV 包沿用旧判据 |
+
+### 21.3 新增最终判据：真源 ↔ ROM 产物
+
+`overlay/` 是 11-07 的 legacy 链路（`apply_overlay.py` 的 `FILES` 未注册
+`ardbeg_fps_match.sh` / `ardbeg_gpu_video.sh`，往里补文件也不会进包），
+所以「真源 / overlay 一致」不足以证明改动进了 ROM。新增一段直接比对
+`initfiles/` 真源与 `out/.../target_files-*/SYSTEM/bin/` 产物的 md5，
+覆盖 4 个关键脚本，缺一或字节不符都计入 `N_BAD`。
+
+### 21.4 同步的派生副本
+
+`repack/overlay/` 里 3 个陈旧副本同步到设备树真源（旧版备份在
+`wb_tmp/overlay_backup_20261112/`）：
+
+- `system/bin/zz-ardbeg-firstboot-fix.sh`（补上 `5cc3094` 的 4c 节 + 第 10 节，共 108 行）
+- `system/bin/sf_hwc_off.sh`
+- `system/etc/init/zz-sf-hwc-off.rc`
+
+### 21.5 验收结果
+
+`./check.sh` → **RC=0，0 个 `[错误]`**；29 个补丁「已应用 29 / 有问题 0」；
+最新包正确识别为 `cm_ardbeg-ota-5002791a80.zip`（17 条目）；
+4 个关键脚本「真源 = 产物」。`install.sh` / `uninstall.sh` / `_common.sh`
+`sh -n` 全过，`_udiff.py` 在 python3 下 `py_compile` 与非参数调用均正常。
+
+本轮未改任何功能代码、未改默认属性、未重打包、未刷分区、未重启设备。

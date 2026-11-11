@@ -923,7 +923,18 @@ if [ ! -d "${DIST_ROOT}" ]; then
 elif [ -z "${PY}" ]; then
     echo "  [跳过] 找不到 python，无法读 zip 条目"
 else
-    LATEST=$(ls -t "${DIST_ROOT}"/*/cm_ardbeg_tv-ota-eng.dy.zip 2>/dev/null | head -1)
+    # [2026-11-12 固化修复] 选包不能只盯着 11-07 的文件级重打包 dist/。
+    #   项目 11-11 起切回「改设备树 + make otapackage」，产物落在
+    #       out/target/product/ardbeg/cm_ardbeg-ota-<incremental>.zip
+    #   真机当前刷入的 5002791a80 就是这一份：17 条目、签名件齐全、
+    #   testzip 干净、build.prop 带三项 ardbeg 属性。
+    #   若继续只扫 DIST_ROOT，会永远拿 1107 那份条目数=1 的旧实验包来判，
+    #   报出一串与现状无关的「缺条目 / 损坏 / 缺签名」。
+    #   这里把两类候选合并后按 mtime 取最新；下面的 17 条目判据对
+    #   标准 otapackage 产物同样适用，无需改动。
+    OTA_OUT="${TOP}/out/target/product/ardbeg"
+    LATEST=$(ls -t "${DIST_ROOT}"/*/cm_ardbeg_tv-ota-eng.dy.zip \
+                   "${OTA_OUT}"/cm_ardbeg-ota-*.zip 2>/dev/null | head -1)
     if [ -z "${LATEST}" ] || [ ! -f "${LATEST}" ]; then
         echo "  [跳过] dist 下还没有 OTA 包"
     else
@@ -1051,20 +1062,83 @@ print('\n'.join(out))
             echo "  [错误] zipfile.testzip() 发现损坏条目"
             PKG_BAD=$((PKG_BAD + 1))
         fi
-        BP_UIHW=$("${PY}" -c "import zipfile,sys; d=zipfile.ZipFile(sys.argv[1]).read('system/build.prop').decode('utf-8','replace'); print('OK' if 'persist.sys.ui.hw=0' in d else 'BAD')" "${LATEST}" 2>/dev/null)
-        if [ "${BP_UIHW}" != "OK" ]; then
-            echo "  [错误] 包内 system/build.prop 没有 persist.sys.ui.hw=0"
-            echo "         这是 HWUI/RenderThread 黑屏根因，见 README 第十一章"
-            PKG_BAD=$((PKG_BAD + 1))
-        else
-            echo "  [已修] 包内 build.prop persist.sys.ui.hw=0"
-        fi
+        # [2026-11-12 固化修复] build.prop 判据按产品自适应。
+        #   persist.sys.ui.hw=0 是 lineage_tv.mk 第 52 行附近为 TV 产品
+        #   加的（HWUI/RenderThread 黑屏根因，见 README 第十一章）。
+        #   当前 lunch 用的是 cm_ardbeg-eng（lineage.mk，tablet 产品），
+        #   并不 inherit lineage_tv.mk，这个属性本来就不该出现在包里。
+        #   旧判据把它当硬性要求，于是对所有 11-11 之后的包都误报
+        #   「HWUI 黑屏根因没修」。tablet 链路真正生效的是下面三个
+        #   ardbeg 属性，改成按包内实际形态分支验证：
+        #     - 含 ro.ardbeg.sf_hwc_off=1  -> 当前 tablet 链路，验三项
+        #     - 含 persist.sys.ui.hw=0    -> 旧 TV 重打包包，沿用老判据
+        #     - 两者皆无                 -> 真异常，报错
+        BP_CHECK=$("${PY}" -c "
+import zipfile,sys
+d=zipfile.ZipFile(sys.argv[1]).read('system/build.prop').decode('utf-8','replace')
+if 'ro.ardbeg.sf_hwc_off=1' in d:
+    miss=[k for k in ('persist.ardbeg.fps_match=0','persist.ardbeg.gpu_video=1') if k not in d]
+    print('TABLET_OK' if not miss else 'TABLET_MISS:'+','.join(miss))
+elif 'persist.sys.ui.hw=0' in d:
+    print('TV_OK')
+else:
+    print('BAD')
+" "${LATEST}" 2>/dev/null)
+        case "${BP_CHECK}" in
+            TABLET_OK)
+                echo "  [已修] 当前 tablet 链路：sf_hwc_off / fps_match / gpu_video 三项齐备" ;;
+            TV_OK)
+                echo "  [已修] TV 包内 build.prop persist.sys.ui.hw=0" ;;
+            TABLET_MISS:*)
+                echo "  [错误] 当前包缺 ardbeg 属性：${BP_CHECK#TABLET_MISS:}"
+                PKG_BAD=$((PKG_BAD + 1)) ;;
+            *)
+                echo "  [错误] 包内 build.prop 既无 TV 的 persist.sys.ui.hw=0，也无 tablet 的 ro.ardbeg.sf_hwc_off=1"
+                PKG_BAD=$((PKG_BAD + 1)) ;;
+        esac
         if [ "${PKG_BAD}" -eq 0 ]; then
             echo "  [已修] 17 条目齐全、签名件在、testzip 干净"
         fi
     fi
 fi
 N_BAD=$((N_BAD + PKG_BAD))
+
+# ---------------------------------------------------------------------------
+# [2026-11-12 新增] 设备树改动是否真的编译进 ROM —— 「固化」的最终判据
+#
+#   前面「真源 / overlay 一致」只能证明派生副本没脱节；真正决定刷机后
+#   行为的是 out/.../target_files-*/SYSTEM/ 里的编译产物。11-11 起本项目
+#   已从「文件级 overlay 重打包」切回「改设备树 + make otapackage」，
+#   overlay 是 legacy 链路（apply_overlay.py 的 FILES 里没有
+#   ardbeg_fps_match.sh / ardbeg_gpu_video.sh 等新服务，往 overlay 里补文件
+#   也不会进包），所以这里直接比对 真源 ↔ SYSTEM/bin 产物 的 md5。
+#   四个关键脚本缺一或字节不符，都算设备树改动没固化。
+# ---------------------------------------------------------------------------
+echo
+echo "设备树改动是否编译进 ROM（真源 ↔ target_files/SYSTEM md5）："
+TF_SYS=$(ls -td "${TOP}"/out/target/product/ardbeg/obj/PACKAGING/target_files_intermediates/cm_ardbeg-target_files-*/SYSTEM 2>/dev/null | head -1)
+ROM_BAD=0
+if [ -z "${TF_SYS}" ] || [ ! -d "${TF_SYS}/bin" ]; then
+    echo "  [跳过] 还没做过 otapackage，找不到 target_files 产物"
+else
+    for f in zz-ardbeg-firstboot-fix.sh sf_hwc_off.sh ardbeg_fps_match.sh ardbeg_gpu_video.sh; do
+        src="${HERE}/../initfiles/${f}"
+        dst="${TF_SYS}/bin/${f}"
+        if [ ! -f "${dst}" ]; then
+            echo "  [错误] 产物缺 ${f}（设备树改动没编进 ROM）"
+            ROM_BAD=$((ROM_BAD + 1))
+        elif [ "$(md5sum "${src}" | cut -d' ' -f1)" != "$(md5sum "${dst}" | cut -d' ' -f1)" ]; then
+            echo "  [错误] ${f} 真源与产物 md5 不一致（产物是旧版）"
+            ROM_BAD=$((ROM_BAD + 1))
+        else
+            echo "  [已修] ${f} 真源 = 产物"
+        fi
+    done
+    if [ "${ROM_BAD}" -eq 0 ]; then
+        echo "  [已修] 4 个关键脚本全部与设备树真源逐字节一致"
+    fi
+fi
+N_BAD=$((N_BAD + ROM_BAD))
 
 if [ "${N_BAD}" -gt 0 ]; then
     echo

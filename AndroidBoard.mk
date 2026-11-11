@@ -61,7 +61,7 @@ endif
 #     -include vendor/nvidia/ardbeg/ardbge-vendor.mk
 #   注意 ardbge 是拼写错误（应为 ardbeg），所以这一行在 cm-11 上其实一直是
 #   个空操作（-include 找不到文件也不报错）。
-#   cm-14.1 上 vendor 闭源包清单已经由 device.mk 第 322 行统一继承：
+#   cm-14.1 上 vendor 闭源包清单已经由 device.mk 的"产品继承"段统一继承：
 #     $(call inherit-product, vendor/nvidia/ardbeg/ardbeg-vendor.mk)
 #   如果在 AndroidBoard.mk 里再把拼写修正后 include 一次，同一个产品 mk 会被
 #   继承两遍，PRODUCT_COPY_FILES 里每条 blob 都会重复一份，构建时刷出大量

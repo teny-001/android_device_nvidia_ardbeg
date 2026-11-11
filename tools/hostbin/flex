@@ -1,0 +1,44 @@
+#!/bin/bash
+# =============================================================================
+# tools/hostbin/flex —— 顶替 AOSP 预编译 flex 2.5.39 的包装脚本
+# =============================================================================
+#
+# 【为什么需要它】
+#   prebuilts/misc/linux-x86/flex/flex-2.5.39 是 2013 年静态链接的老二进制。
+#   在本机 zh_CN.UTF-8 locale 下执行任何操作都会崩：
+#       loadlocale.c:130: _nl_intern_locale_data:
+#       Assertion `cnt < (sizeof (_nl_value_type_LC_TIME) / ...)' failed.
+#       Aborted (core dumped)
+#   它的 locale 数据表按老 glibc 编的，遇到新系统的 LC_TIME 数据长度就对不上。
+#   强制 C locale 可以完全绕开 locale 初始化这条路径。
+#
+# 【为什么不直接改 prebuilts 里那个文件】
+#   prebuilts/ 属于源码树，改了就偏离上游，repo sync / git checkout 会冲突。
+#   build/core/config.mk 第 527 行本来就留了开关：
+#       ifeq ($(USE_HOST_LEX),yes)
+#         LEX := flex                      <- 用 PATH 里的 flex
+#       else
+#         LEX := prebuilts/misc/$(BUILD_OS)-$(HOST_PREBUILT_ARCH)/flex/flex-2.5.39
+#       endif
+#   BoardConfig.mk 里置 USE_HOST_LEX := yes，再由 vendorsetup.sh 把本目录
+#   放进 PATH，源码树一个字节都不用动。
+#
+# 【为什么用 exec -a】
+#   flex 会把 argv[0] 写进生成文件的头部注释和 #line 指令。不重置 argv[0]
+#   的话，生成的 .c 里会出现本脚本的路径名，和上游产物对不上。
+# =============================================================================
+
+set -e
+
+# 源码树根：本文件在 <top>/device/nvidia/ardbeg/tools/hostbin/ 下，往上 5 层
+_top=${ANDROID_BUILD_TOP:-$(cd "$(dirname "$0")/../../../../.." && pwd)}
+_real="$_top/prebuilts/misc/linux-x86/flex/flex-2.5.39"
+
+if [ ! -x "$_real" ]; then
+    echo "flex wrapper: 找不到预编译 flex: $_real" >&2
+    echo "              （识别到的源码树根是 $_top，可用 ANDROID_BUILD_TOP 覆盖）" >&2
+    exit 127
+fi
+
+export LC_ALL=C LANG=C LANGUAGE=C
+exec -a flex "$_real" "$@"

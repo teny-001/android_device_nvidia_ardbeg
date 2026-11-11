@@ -49,25 +49,48 @@ detect_top() {
 #   三个脚本直接罢工。源码树自带 python 2.7.5，系统也有 python3，
 #   所以补一条 Python 路线，保证这套脚本在任何机器上都可用。
 # -----------------------------------------------------------------------------
+# [2026-11-12 固化修复] 候选解释器必须「真的能跑」，不能只看 -x。
+#
+#   踩过的坑：prebuilts/python/linux-x86/2.7.5/bin/python2.7 文件存在、
+#   有可执行位（-x 为真），但它缺动态 loader，实际执行报
+#       bash: ...: 无法执行：找不到需要的文件
+#   旧版 find_python() 只看 -x 就把它返回；check.sh 用这个解释器跑
+#   py_compile 得到 rc=127，于是把两个本来语法完全正确的 .py
+#   （tools/gen_flash_blocks.py、tools/verify_six_layers.py）误报成
+#   「语法检查失败」。这类「装了但跑不了」的解释器必须用一次真实执行筛掉。
+#   注意：宿主构建环境里不一定有容器专属的 managed python 路径，所以下面
+#   每一档都要过 _py_can_run，失败就继续找下一档。
+_py_can_run() {
+    [ -x "$1" ] || return 1
+    "$1" -c 'pass' >/dev/null 2>&1
+}
+
 find_python() {
-    # Prefer the managed Python interpreter when present; the source tree's
-    # legacy Python 2.7 may be missing in minimal CM11 checkouts.
-    if [ -x "/home/dy/.workbuddy-ai/binaries/python/versions/3.13.12/bin/python3" ]; then
-        echo "/home/dy/.workbuddy-ai/binaries/python/versions/3.13.12/bin/python3"
+    # 1) 首选 managed python3（容器内路径；宿主上不存在会自动跳过）
+    _c="/home/dy/.workbuddy-ai/binaries/python/versions/3.13.12/bin/python3"
+    if _py_can_run "${_c}"; then
+        echo "${_c}"
         return 0
     fi
-    # 优先源码树自带的 python2.7.5（构建环境里一定存在）
-    _top="${1:-}"
-    if [ -n "${_top}" ] && [ -x "${_top}/prebuilts/python/linux-x86/2.7.5/bin/python2.7" ]; then
-        echo "${_top}/prebuilts/python/linux-x86/2.7.5/bin/python2.7"
-        return 0
-    fi
+    # 2) 系统 python3 优先于 python2：本目录的 .py 都是 py2/py3 兼容，
+    #    而 check.sh 里读 zip / build.prop 的片段用 python3 最稳。
+    #    command -v 只保证「有这个名字」，仍要过 _py_can_run 才算数。
     for c in python3 python2 python python2.7; do
-        if command -v "$c" >/dev/null 2>&1; then
-            command -v "$c"
+        _p=$(command -v "$c" 2>/dev/null) || continue
+        if _py_can_run "${_p}"; then
+            echo "${_p}"
             return 0
         fi
     done
+    # 3) 最后才轮到源码树自带的 python2.7.5，且同样要过可执行性探测。
+    _top="${1:-}"
+    if [ -n "${_top}" ]; then
+        _p="${_top}/prebuilts/python/linux-x86/2.7.5/bin/python2.7"
+        if _py_can_run "${_p}"; then
+            echo "${_p}"
+            return 0
+        fi
+    fi
     echo ""
 }
 

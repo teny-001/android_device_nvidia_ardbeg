@@ -43,9 +43,9 @@
 # 【怎么重新生成 ArdbegIME.apk】
 #   改完 src/ 或 res/ 后，在**宿主机**执行（容器里没有 java）：
 #       flatpak-spawn --host bash \
-#           "/home/dy/WorkBuddy AI/2026-10-23-16-34-21/aosp-src/device/nvidia/ardbeg/ime/build.sh"
+#           <源码树根>/device/nvidia/ardbeg/ime/build.sh
 #   build.sh 会输出到 ime/out/ArdbegIME.apk，把它拷回本目录覆盖即可。
-#   注意 build.sh 里的路径变量是按本机目录写的，换机器要改。
+#   build.sh 里的 SRC_TREE 按脚本位置自动推断，换机器一般不用改。
 # ============================================================================
 
 LOCAL_PATH := $(call my-dir)

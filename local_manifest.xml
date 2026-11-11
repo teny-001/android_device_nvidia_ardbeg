@@ -2,13 +2,24 @@
 <!--
   cm-14.1 local manifest for ardbeg (NVIDIA Tegra K1 T124 / TN8 P1761).
 
-  【为什么 device 仓库映射到 device/nvidia/ardbeg 而不是 device/nvidia】
-    Android 的 device 仓库惯例是「仓库根 = device/<vendor>/<device>/」。
-    本次移植虽然还合并了 ardbeg_tv 与 shield-common 两个兄弟树，但它们是
-    以 merged/ 快照形式随仓库分发的，由 install-layout.sh 展开，不是仓库根
-    下的并列目录。这样 clone 下来就能直接 lunch，也不会和 LineageOS 官方
-    manifest 里的 device/nvidia/* 项目产生 path 嵌套冲突（repo 不允许一个
-    project 的 path 是另一个 project 的父目录）。
+  【两个仓库】
+    本设备需要两个仓库，缺一不可：
+
+      device/nvidia/ardbeg   设备树 + shield-common 的 sepolicy/seccomp 快照
+                             -> android_device_nvidia_ardbeg
+      vendor/nvidia/ardbeg   原厂 4.4.4 预编译 blob（324 文件 / 114 MiB）
+                             -> android_vendor_nvidia_ardbeg
+
+    两者是独立仓库，路径各就各位，不需要任何展开脚本。
+
+  【device 仓库内部还并进了一份 shield-common】
+    <root>/shield-common/
+        sepolicy/common/           通用域定义
+        sepolicy/lineage-common/   LineageOS 额外域
+        seccomp/                   系统调用白名单
+    来自 LineageOS 官方 android_device_nvidia_shield-common 的 cm-14.1 快照。
+    只有这几项被引用（BoardConfig.mk 的 BOARD_SEPOLICY_DIRS /
+    BOARD_SECCOMP_POLICY），其余内容与本板无关，没有一并引入。
 
   【内核仓库不在此列】
     android_kernel_nvidia_ardbeg 保持 4.4 时代分支不动：本 ROM 使用
@@ -16,18 +27,10 @@
     TARGET_KERNEL_SOURCE 故意指向不存在的 kernel/nvidia/ardbeg__prebuilt_only，
     不会走源码编译。详见 DEPENDENCIES.md 第 2 节。
 
-  【使用前的两步】
-    1) repo sync 完成后：
-         cd device/nvidia/ardbeg && ./install-layout.sh
-       把 merged/ardbeg_tv 与 merged/shield-common 展开到 device/nvidia/。
-    2) 打 AOSP 补丁：
-         cd device/nvidia/ardbeg/patches && ./check.sh && ./install.sh
-       不打补丁能编译但开不了机。
-
-  【冲突处理】
-    若本地 manifest 已经声明了同名 project（例如 cm-11 分支的旧 ardbeg），
-    请在本文件前面加 <remove-project name="..."/>，或改用
-    `git clone -b cm-14.1 <url> device/nvidia/ardbeg` 手工放置。
+  【使用前的唯一一步】
+    打 AOSP 源码补丁：
+        cd device/nvidia/ardbeg/patches && ./check.sh && ./install.sh
+    不打补丁能编译，但编出来的 ROM 开不了机。
 -->
 <manifest>
   <remote name="teny001"

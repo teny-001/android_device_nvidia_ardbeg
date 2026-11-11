@@ -201,3 +201,153 @@ ro.logd.size=16M
 #   同文件内靠后出现的 dalvik.vm.checkjni 才能确保生效顺序清晰。
 dalvik.vm.checkjni=false
 
+
+# ============================================================================
+# 【2026-11-10 新增】厂商 HWC 合成总开关
+#
+#   ro.ardbeg.sf_hwc_off=1  启动后把 SurfaceFlinger 的 mDebugDisableHWC 置 1，
+#                           禁止 g100 原厂 4.4.4 的 hwcomposer.tegra.so 参与
+#                           客户端 layer 合成（只处理 FB TARGET）。默认值。
+#   ro.ardbeg.sf_hwc_off=0  不干预，交给厂商 HWC 自己判断是否用 overlay。
+#
+#   为什么默认是 1（2026-11-10 第二轮实测后的定论）：
+#     置 0 会真的让厂商 HWC 去合成（Compositor 变成 glcomposer），
+#     然后在它内部的 GL 合成器里 SIGSEGV：
+#         #00 RefBase::decStrong+37            (libutils.so)
+#         #01 sp<GraphicBuffer>::operator=+22  (hwcomposer.tegra.so)
+#         #02 destroy_graphic_buffer+8
+#         #04 glc_set+1096
+#         #05 hwc_composite_set+252
+#     崩完 SF 重启、所有 BufferQueue 变孤儿 -> 永久黑屏。
+#     所以 1 不是"保守选择"，而是**唯一能正常显示的配置**。
+#     留这个开关是为了将来若修好 hwcomposer.tegra.so 的 glcomposer 崩溃，
+#     能一行属性切回去验证，不用重新编译。
+#
+#   为什么用 ro.* 而不是 persist.*：
+#     persist.* 要等 init 执行 on post-fs-data 里的 load_persist_props 才读进
+#     属性空间，而 sf_hwc_off.sh 由 zz-sf-hwc-off.rc 的 on post-fs 拉起，
+#     那一刻 persist 还是空的，开关会永远失效。ro.* 来自 /system/build.prop，
+#     on init 阶段就已就绪。
+#
+#   注意：早期文档说「4.4.4 与 7.1 的 hwc_layer_1_t 错位 4 字节、SF 每
+#   40~100 秒崩一次」——2026-11-10 复核已推翻，两版结构体在 0~72 偏移上
+#   逐字段一致，tombstones 里也没有任何 surfaceflinger 记录。论证见
+#   initfiles/sf_hwc_off.sh 头部注释。
+# ============================================================================
+ro.ardbeg.sf_hwc_off=1
+
+# ============================================================================
+# 【帧率匹配开关 2026-11-10 新增，2026-11-11 按真实 App 实测重写】
+#
+#   1 = ardbeg_fps_match.sh 常驻，并自动按片源区间分类切显示刷新率
+#   0 = 不自动切：watch 进程仍常驻但停在待机分支，零显示副作用
+#       （脚本仍可手动跑 apply/match/detect/auto/status）
+#   【2026-11-11】两者都只需 setprop 即生效，不需要 stop/start 服务：
+#   常驻服务自己每 5 秒轮询一次开关，详见
+#   initfiles/ardbeg_fps_match.sh 的 IDLE_INTERVAL 补记 #2。
+#
+#   ★ 2026-11-11 策略修正（针对在线视频 App，不是本地测试片）：
+#     真实 App（CIBN/优酷）实测同一段观看里帧率会变：
+#       片前广告约 25fps（60Hz 下 14.1% 跳帧），正片约 30.13fps
+#       （numFramesTotal 15 秒 +452 帧）。
+#     30fps 在 60Hz 上本来就是 2:2 完美匹配，切到 50Hz 反而是 5:3
+#     pulldown、比不切更差 —— 所以自动模式不能见帧率就套映射表。
+#
+#     现在脚本：
+#       - 帧率检测改用 dumpsys media.player 的 numFramesTotal 累计增量
+#         （解码器侧，与 SurfaceFlinger 层、与刷新率都无关），不再用
+#         --latency（在线 App 有多个同名层、层会增删、切到 50Hz 后
+#         刷新周期行变 20ms 会被误判成 50fps 自我强化）。
+#       - 自动模式不做精确吸附（实测 25fps 片源有约 -5% 系统性偏低，
+#         24 与 25 只差 4%，边界上会摇摆），改成区间分类：
+#         实测 22.00~27.50fps -> 50Hz；其余（含 30/50/60fps）保持 60Hz。
+#       - 加滞回(连续 3 轮) / 最短驻留 20s / 最短播放 10s，
+#         避免广告<->正片切换时反复切 HDMI 把电视闪黑。
+#     详见 initfiles/ardbeg_fps_match.sh 文件头【2026-11-10 补记】。
+#
+#   为什么默认 0（效果已验证，但仍有代价）：
+#     2026-11-10 本地 25.000fps / 425 帧测试片，用渲染端请求的上屏时刻
+#     （dumpsys SurfaceFlinger --latency 的 desiredPresentTime）间隔分布衡量：
+#         60Hz: 理想 40.0ms 占 84.7%，跳过一帧(83.3ms) 占 12.4%，std 22.46ms
+#         50Hz: 理想 40.0ms 占 94.5%，跳过一帧(83.3ms) 占  4.4%，std 11.93ms
+#     即切到 50Hz 后被跳过的帧少了约 3 倍，节奏明显更匀。
+#     2026-11-11 真机复验：本地片 auto 从 60Hz 切到 50Hz 成功；
+#     50Hz 下再 detect 仍判 50Hz（不自我强化）；真实 App 广告期
+#     22.66~26.61fps 也都正确判 50Hz；注入 30fps 窗口保持 60Hz。
+#
+#     注意 numFramesDropped 测不出这个改善（60Hz 6.87% vs 50Hz 6.65%）：
+#     pulldown 下每帧都上屏了，只是被保持 2 或 3 个 vsync，
+#     那个计数器只统计「来不及被丢掉」的帧，对节奏不匀不敏感。
+#
+#     仍然默认 0 的两条原因：
+#       1) 每次切 HDMI 时序电视都要黑一下重新同步（有的还会弹
+#          "1920x1080 50Hz" 角标）。看短视频时这个闪烁比 pulldown 本身更烦，
+#          所以脚本里另加了 MIN_PLAY_SEC=10 / MIN_DWELL_SEC=20 兜底，
+#          但是否启用仍交给使用者自己权衡。
+#       2) 24Hz 自动切换已明确放弃：本机 1080p 模式表里没有 48Hz，
+#          24Hz 会把整个系统 UI 拖到 24fps，且部分电视不认 24Hz 输入
+#          会回落或黑屏。想要 24p 观感用 `match 24` 手动切。
+#
+#   要试的话（2026-11-11 更正：watch 服务常驻、每 5 秒轮询一次开关，
+#   setprop 即生效，不需要也不应该 stop/start。stop/start 反而会破坏
+#   0bfadc0 修好的「常驻待机」状态机，让服务回到「非 oneshot 退出即
+#   重启」的老路）：
+#     setprop persist.ardbeg.fps_match 1
+#     ardbeg_fps_match.sh status
+#
+#   为什么用 persist.* 而不是 ro.*：
+#     ro.* 只能开机时由 init 读一次，运行期 setprop 无效，调试很不方便。
+#     persist.* 可以运行期改并写回 /data/property，重启还在。
+#     本服务由 on property:sys.boot_completed=1 拉起，那时
+#     load_persist_props 早就跑完了，能读到正确值。
+# ============================================================================
+persist.ardbeg.fps_match=0
+
+# ============================================================================
+# 【视频播放 GPU 调频开关 2026-11-11 新增】
+#
+#   1 = 开机应用修改值（默认）：把 GPU devfreq 三项 debugfs 参数从原厂
+#       默认改成让「关掉 HWC 后 SF GLES 合成」跑得动的值，见下。
+#   0 = 写回原厂三项默认值（等效于没装这个功能）。
+#
+#   【背景】ro.ardbeg.sf_hwc_off=1（厂商 hwcomposer 的 glcomposer 在
+#   7.1 上会 SIGSEGV，必须关 HWC），于是 1920x1080 全屏画面全部由
+#   SurfaceFlinger 用 GLES 合成，GPU 是每帧出图的必经路径。但
+#   nvhost_podgov 默认 load_target=700，actmon 把「等 vsync」算成空闲，
+#   实测播放 25fps 片源时 load 平均仅 372/1000，governor 判定不忙，
+#   GPU 长期停在 72~180MHz（852MHz 一次没上过）；同时
+#   gr_idle_timeout=10ms 小于 60Hz 帧间隔 16.67ms，每帧之间必进一次
+#   ELPG 电源门控 -> 唤醒重新升频 -> 单帧合成忽长忽短 -> 常错过
+#   vsync -> desiredPresentTime 出现 83.3ms 跳帧。
+#
+#   三项写入值（都在 debugfs，重启即丢，故由 zz-ardbeg-gpu-video.rc
+#   在 sys.boot_completed=1 之后开机重写一遍）：
+#     scaling/load_target            700   -> 300
+#     scaling/use_throughput_hint      0   -> 1
+#     gr_idle_timeout_default_us   10000   -> 50000
+#
+#   【A/B 实测，同一 25.000fps 本地片 / 同一 60Hz / 同一指标】
+#     原厂默认        跳帧 14.6%  理想帧 81.6%  上屏延迟 46.5ms
+#                     GPU 均频 75.6MHz   解码 24.21fps
+#     应用后          跳帧  6.8%  理想帧 93.2%  上屏延迟 32.4ms
+#                     GPU 均频 102.6MHz  解码 25.10fps
+#     跳帧 -7.7pp / 理想帧 +11.6pp / GPU 均频 +27.0MHz；
+#     两轮解码速率与丢帧增量完全相同 -> 改善来自合成/上屏链路，
+#     不是解码能力（media_codecs.xml 里 H.264 只有 ffmpeg/google 软解，
+#     但 720p/25fps 完全够用）。
+#
+#   【和帧率匹配的关系】上面 persist.ardbeg.fps_match 修的是「片源帧率
+#   与刷新率不整除」(25fps/60Hz 的 3:2 pulldown)；本项修的是「合成链路
+#   因 GPU 低频超时错过 vsync」。两层叠加才构成完整卡顿，两项都解决
+#   才接近无跳帧。在线 App 片源帧率会动态变化（片前广告约 25fps、
+#   正片约 30fps），所以帧率匹配默认 0，而本项对 60/50Hz 都有效、默认 1。
+#
+#   【风险】降 load_target 让 GPU 更易升频，待机功耗/发热略增；本机有
+#   thermal 节流，长时间高负载可能触发。故做成可关，也可运行时手动：
+#     ardbeg_gpu_video.sh apply | restore | status
+#   setprop 之后需重启，才会在开机入口重新读取该值。
+#
+#   详见 initfiles/ardbeg_gpu_video.sh 头部（哪些节点可写/写不动、
+#   参数含义、完整 A/B 数据）与 initfiles/Android.mk 5.4c 节。
+# ============================================================================
+persist.ardbeg.gpu_video=1

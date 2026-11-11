@@ -196,13 +196,25 @@ TARGET_TEGRA_TOUCH := raydium
 # 因此：
 #   - 主体策略复用 shield-common（同为 T124，且是官方 14.1 维护的策略）；
 #   - 本设备只补 ardbeg 特有的 device 节点（见 sepolicy/）。
+
+# 【关键】策略版本必须降到 28
+#   本机内核是原厂 4.4.4 的 3.10.24，SELinux 停在
+#   POLICYDB_VERSION_DEFAULT_TYPE(28)，也就是「xperms 之前」的版本
+#   （xperms 是 Linux 3.14 才进主线）。实测 dmesg：
+#       SELinux: policydb version 30 does not match my version range 15-28
+#       init: failed to load policy: Invalid argument
+#       init: Security failure; rebooting into recovery mode...
+#   7.1 默认 POLICYVERS=30，直接刷必然进 recovery。
+#   降到 28 后 checkpolicy 拒绝写 xperm 规则，Android.mk 里同步做剥离，
+#   见 patches/system/sepolicy/Android.mk.patch。
+POLICYVERS := 28
 BOARD_SEPOLICY_DIRS += \
-    device/nvidia/shield-common/sepolicy/common \
-    device/nvidia/shield-common/sepolicy/lineage-common \
+    device/nvidia/ardbeg/shield-common/sepolicy/common \
+    device/nvidia/ardbeg/shield-common/sepolicy/lineage-common \
     device/nvidia/ardbeg/sepolicy
 
 # 7.1 的 sepolicy 需要 seccomp 策略（shield-common 自带）
-BOARD_SECCOMP_POLICY := device/nvidia/shield-common/seccomp
+BOARD_SECCOMP_POLICY := device/nvidia/ardbeg/shield-common/seccomp
 
 # ============================================================================
 # 九、HAL 变体（shield-common 约定的变量）
@@ -291,3 +303,85 @@ TARGET_NO_RECOVERY := false
 #   实测已通过。
 # ============================================================================
 ADDITIONAL_DEFAULT_PROPERTIES += ro.logd.size=4194304
+
+# ============================================================================
+# 十四、本机构建环境适配（2026-11-08 新增）
+# ============================================================================
+#
+# 【这个开关干什么】
+#   build/core/config.mk 第 527 行本来就有：
+#       ifeq ($(USE_HOST_LEX),yes)
+#         LEX := flex
+#       else
+#         LEX := prebuilts/misc/$(BUILD_OS)-$(HOST_PREBUILT_ARCH)/flex/flex-2.5.39
+#       endif
+#   置 yes 之后，build 系统不再用 prebuilts 里那个 2013 年的 flex 二进制，
+#   改成从 PATH 里找 flex。vendorsetup.sh 把
+#   device/nvidia/ardbeg/tools/hostbin 插到 PATH 最前面，里面就是包装脚本。
+#
+# 【为什么必须绕这一下】
+#   预编译 flex 2.5.39 在本机 UTF-8 locale 下必崩：
+#       loadlocale.c:130: _nl_intern_locale_data: Assertion ... failed
+#       Aborted (core dumped)
+#   而 prebuilts/ 属于源码树，直接换掉二进制会让 repo sync / git checkout
+#   冲突。用这个开关 + 设备树内的包装脚本，源码树零改动。
+#
+# 【bison 为什么不能用同样的办法】
+#   config.mk 里也有 USE_HOST_BISON，但它指向 $(HOST_OUT_EXECUTABLES)/bison
+#   （out/ 目录下），要先由 external/bison 编出来；而 ninja 不会把这个文件
+#   当依赖，首次构建直接 "No such file or directory"。所以 bison 只能沿用
+#   prebuilts 内的包装脚本（由 patches/env-fix/fix-source-tree.sh 生成），
+#   那是本项目唯一需要碰源码树的地方。
+USE_HOST_LEX := yes
+
+# ----------------------------------------------------------------------------
+# Jack：保留编译器，只关掉常驻 server
+# ----------------------------------------------------------------------------
+# 【症状】
+#   build/core/ninja.mk 里的 "Ensure Jack server is installed and started"
+#   这一步会用 prebuilts/sdk/tools/jack-admin 起一个本地 HTTPS 服务，之后
+#   jack 客户端再通过 TLS 连上去提交编译任务。本机 jack server 1.3-a8 是
+#   Java 8 的 SSLEngine 实现：JackHttpServer.configureSocket() 先把可用套件
+#   过滤成只剩 TLS_(DHE)|(EDH).*，再 setNeedClientAuth(true)，与较新的 JDK
+#   握手时服务端直接断开。服务端日志是：
+#       No available cipher suite for TLS13/TLS12
+#   客户端看到的是：
+#       SSL error when connecting to the Jack server. Try 'jack-diagnose'
+#       Communication error with Jack server (35)
+#
+# 【已排除】
+#   证书 CN 不符（curl -k 无效）、强制降级 TLSv1.2、删掉 ~/.jack-server 重新
+#   install-server、-Djdk.tls.disabledAlgorithms=、换 Temurin 8u312 —— 全部
+#   无效。说明不是证书校验问题，而是套件协商阶段就没有交集。
+#
+# 【做法】关掉 server，不关编译器
+#   prebuilts/sdk/tools/jack 脚本第 74 行本来就有"无 server 模式"：
+#       if [ "$JACK_SERVER" != "true" ]; then
+#           exec $JACK_MAIN_COMMAND -jar $JACK_REPOSITORY/jack-$JACK_VERSION.jar "$@"
+#   JACK_SERVER=false 时直接起一个 JVM 跑编译器 jar，全程不监听、不连接任何
+#   socket，TLS 问题自然不存在。jack_server_setup.mk 里也有对应开关
+#   （JACK_SERVER != true 时 jack_server_disabled=true，整条 setup-jack-server
+#   配方变空），所以 "Ensure Jack server ..." 那一步会自动消失，不用改 ninja.mk。
+#
+#   JACK_REPOSITORY 要指向 prebuilts/sdk/tools/jacks（那里有
+#   jack-3.36.CANDIDATE.jar，正好等于 jack_versions.mk 里的
+#   JACK_DOGFOOD_VERSION）。这两个变量都由 vendorsetup.sh 导出到环境，
+#   这里再声明一次是为了让本文件自解释、也方便单独检查。
+#
+# 【为什么不能退回 javac + dx】
+#   两条路都试过，都不通：
+#     1) 直接关 Jack 走 dx —— dx 的类文件解析器只认到 class 51，而
+#        build/core/java_common.mk 在 LOCAL_SDK_VERSION 为空时默认给
+#        -target 1.8（class 52），所有没写 LOCAL_SDK_VERSION 的模块都在
+#        "target Dex" 这一步炸：
+#            PARSE ERROR: unsupported class file version 52.0
+#        （实测 BasicDreams / InputDevices / ExtShared 三个）
+#     2) 把默认语言级别压到 1.7 迁就 dx —— frameworks/base 用了 Java 8 的
+#        默认方法（android.media.AudioRouting.OnRoutingChangedListener），
+#        javac 直接报 18 个错：
+#            -source 1.7 中不支持默认方法
+#   也就是说这棵树的框架代码本来就依赖 Jack 的 desugar，Jack 编译器不能丢。
+#
+# 【代价】没有常驻 server，每个模块编译都要冷启一次 JVM，整体比 server 模式
+#   慢一些；换来的是不依赖任何本地服务、结果可复现。
+JACK_SERVER := false

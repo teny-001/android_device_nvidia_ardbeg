@@ -115,9 +115,10 @@
 
          WiFi 同理。虽然 vendor/cm/overlay/common 里已经写了
          def_wifi_on=true，但 CM common overlay 是否被选中取决于产品继承链，
-         而 device/nvidia/shield-common/overlay/tv 那份
+         而官方 shield-common 仓库的 overlay/tv 那份
          （同时带 def_wifi_on / def_bluetooth_on=true）只对 shield 生效，
-         ardbeg 并没有继承它。这里显式写两条，避免依赖外部 overlay。
+         ardbeg 并没有继承它（本仓库只并入 shield-common 的 sepolicy 与
+         seccomp，没有并入 overlay）。这里显式写两条，避免依赖外部 overlay。
 
          【生效时机：全量编译路径】
 

@@ -26,3 +26,21 @@
      sysclktz 0
  
      # Mix device-specific information into the entropy pool
+@@ -306,8 +325,15 @@
+     # Mount default storage into root namespace
+     mount none /mnt/runtime/default /storage slave bind rec
+ 
+-    # Make sure /sys/kernel/debug (if present) is labeled properly
+-    restorecon_recursive /sys/kernel/debug
++    # 【不要 restorecon_recursive /sys/kernel/debug】
++    #   debugfs 不支持 security.* xattr，setxattr 返回 EOPNOTSUPP
++    #   （"Operation not supported on transport endpoint"），而 init 的 restorecon
++    #   会对 debugfs 下**每个文件**各打一行错误。实测一次冷启动产生 5460 行，
++    #   占 ramoops 的 88%，把内核 log ring
++    #   buffer 冲得只剩 780 行，之后任何真实的内核问题都看不到。
++    #   这条命令在本机是 100% 失败的 no-op，去掉不改变任何行为。
++    #   实测去掉后同一台机器冷启动只剩 3 行。
++    # restorecon_recursive /sys/kernel/debug
+ 
+     # We chown/chmod /cache again so because mount is run as root + defaults
+     chown system cache /cache

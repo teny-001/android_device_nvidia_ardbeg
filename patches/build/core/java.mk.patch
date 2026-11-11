@@ -36,7 +36,7 @@
  
  legacy_proguard_flags += -printmapping $(proguard_dictionary)
  jack_proguard_flags := -printmapping $(jack_dictionary)
-@@ -618,6 +645,34 @@
+@@ -618,6 +645,49 @@
  endif
  endif # LOCAL_JACK_ENABLED is disabled
  
@@ -62,11 +62,26 @@
 +#     没有 Java 源码的 APK（如 framework-res）不会走到这里。
 +#   * 输出固定写成单文件 $@（with-local/classes.dex），dx 若超限会自己报错，
 +#     不会静默产出 classes2.dex 让后面的 cp 规则抓错文件。
++#   * **必须用 ifndef LOCAL_JACK_ENABLED 包起来**。make 对同一目标的多条规则
++#     会合并前置依赖，Jack 分支第 784 行自己也定义了
++#         $(built_dex_intermediate): $(jack_all_deps) | setup-jack-server
++#     如果不加守卫，Jack 模块就会额外依赖 full_classes_proguard_jar
++#     → full_classes_jar → javac 的 transform-java-to-classes.jar，
++#     也就是 Jack 模块也白跑一遍 javac。而 javac 的 classpath 全是 .jar，
++#     Jack 构建只产出 .jack，于是报
++#         错误: 程序包org.junit不存在 / 程序包com.android.okhttp不存在
++#     日志里同时会出现
++#         java.mk:785: warning: overriding commands for target .../with-local/classes.dex
++#     正是两条规则撞在同一目标上的证据。
++#   * 下面的 $(built_dex) 拷贝规则**不**加守卫：Jack 分支只产出
++#     built_dex_intermediate，拷到 built_dex 这一步两边都要用。
 +# ===========================================================================
++ifndef LOCAL_JACK_ENABLED
 +$(built_dex_intermediate): $(full_classes_proguard_jar) $(DX)
 +	@echo "target Dex: $(LOCAL_MODULE)"
 +	@mkdir -p $(dir $@)
 +	$(hide) $(DX) $(PRIVATE_DX_FLAGS) --dex --output=$@ $<
++endif # LOCAL_JACK_ENABLED
 +
  $(built_dex): $(built_dex_intermediate) | $(ACP)
  	@echo Copying: $@

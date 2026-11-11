@@ -262,23 +262,29 @@ LOCAL_MODULE_PATH  := $(TARGET_OUT)/bin
 include $(BUILD_PREBUILT)
 
 # ---- 4) SurfaceFlinger 关闭 HWC 合成的 rc ----
-#   【这是本轮最重要的修复】
-#   原厂 4.4.4 hwcomposer.tegra.so 的 hwc_layer_1_t 与 7.1 的字段偏移
-#   从 offset 16 起整体错位 4 字节（4.4.4 有 buffer@16，7.1 是 transform@16），
-#   厂商 HWC 按老偏移读 7.1 的 layer 数组，把 visibleRegionScreen.rects
-#   读成 acquireFenceFd，又拿它当指针解引用；同时把 releaseFenceFd
-#   写到 7.1 的 planeAlpha 上，真正的 fence 字段永远是垃圾值。
-#   结果 jemalloc 堆被写坏，SF 每 40~100 秒 SIGSEGV 一次，
-#   而且崩一次就永久黑屏（BufferQueue 变孤儿，WMS 不重建 Surface）。
+#   【2026-11-10 复核更正：下面这段旧注释的「结构体错位」结论是错的】
+#   旧说法「4.4.4 的 hwc_layer_1_t 从 offset 16 起比 7.1 错位 4 字节、
+#   4.4.4 有 buffer@16」已被 CM11 源码证伪：4.4.4 在 offset 12 直接是
+#   handle，根本没有独立 buffer 字段；两版在 0~72 偏移上逐字段一致、
+#   sizeof 都是 96，差异只在 76~96 且厂商都不碰。tombstones 里也从未
+#   出现过 surfaceflinger 记录，所谓「每 40~100 秒崩一次」是误判。
+#   曾经据此往 hwcomposer.h 的 offset 16 插过 buffer 字段，反而造成
+#   黑屏 + EGL_BAD_NATIVE_WINDOW，那两个补丁已删除，别再碰。
 #
-#   修复：SF 起来后立刻
-#       service call SurfaceFlinger 1008 i32 1
-#   切到纯 GLES 合成，HWC 只处理最后一个 FB TARGET layer，
-#   不再遍历/改写客户端 layer 数组。
-#   实测 SF pid 连续 4 分钟以上不变，桌面/设置/应用全部正常渲染。
+#   【真正原因】厂商 HWC 的 glcomposer 一参与合成就崩野指针：
+#       hwc_composite_set+252 -> glc_set+1096
+#       -> destroy_graphic_buffer+8
+#       -> sp<GraphicBuffer>::operator=+22 -> RefBase::decStrong+37
+#       (fault addr 0xc)
+#   崩完 SF 重启、所有 BufferQueue 变孤儿 -> 永久黑屏。
+#   所以 sf_hwc_off.sh 用 service call SurfaceFlinger 1008 i32 1
+#   把 mDebugDisableHWC 置 1、逼 SF 走纯 GLES 合成，是**唯一能正常
+#   显示的配置**，不是保守选择。ro.ardbeg.sf_hwc_off 默认 1，置 0 会黑屏。
+#   完整崩溃栈与偏移对照见 initfiles/sf_hwc_off.sh 头部注释。
 #
-#   为什么用 post-fs-data 启动而不是 sys.boot_completed：
-#   SF 在开机 40~100 秒崩，boot_completed 要到 45 秒才置位，太晚。
+#   【为什么用 post-fs 启动而不是 sys.boot_completed】
+#   要赶在 SF 出第一帧之前把 HWC 关掉，晚了厂商 glcomposer 已经崩了；
+#   boot_completed 要到 45 秒才置位，太晚。
 #   详见 zz-sf-hwc-off.rc 与 sf_hwc_off.sh 顶部注释。
 include $(CLEAR_VARS)
 LOCAL_MODULE       := zz-sf-hwc-off.rc
@@ -296,6 +302,78 @@ LOCAL_MODULE       := sf_hwc_off.sh
 LOCAL_MODULE_TAGS  := optional eng
 LOCAL_MODULE_CLASS := EXECUTABLES
 LOCAL_SRC_FILES    := sf_hwc_off.sh
+LOCAL_MODULE_PATH  := $(TARGET_OUT)/bin
+include $(BUILD_PREBUILT)
+
+# ---- 5.4b) 帧率匹配：显示刷新率跟随片源帧率 ----
+#   解决 25fps 片源在 60Hz 上的 3:2 pulldown 抖动。
+#   脚本里做两件事，顺序固定：先 echo 模式到 fb0/mode 改 DC 时序，
+#   再 service call SurfaceFlinger 1040 让 SF 的 DispSync 跟上。
+#   1040 是本项目新加的 binder 事务码，见 patches/frameworks/native/
+#   services/surfaceflinger/SurfaceFlinger_hwc1.cpp.patch。
+#
+#   默认关闭（persist.ardbeg.fps_match=0），原因见 zz-ardbeg-fps-match.rc。
+include $(CLEAR_VARS)
+LOCAL_MODULE       := zz-ardbeg-fps-match.rc
+LOCAL_MODULE_TAGS  := optional eng
+LOCAL_MODULE_CLASS := ETC
+LOCAL_SRC_FILES    := zz-ardbeg-fps-match.rc
+LOCAL_MODULE_PATH  := $(TARGET_OUT)/etc/init
+include $(BUILD_PREBUILT)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE       := ardbeg_fps_match.sh
+LOCAL_MODULE_TAGS  := optional eng
+LOCAL_MODULE_CLASS := EXECUTABLES
+LOCAL_SRC_FILES    := ardbeg_fps_match.sh
+LOCAL_MODULE_PATH  := $(TARGET_OUT)/bin
+include $(BUILD_PREBUILT)
+
+# ---- 5.4c) 视频播放 GPU 调频（2026-11-11 新增）----
+#   修「关掉 HWC 之后 GPU 被 governor 压在最低档、单帧 GLES 合成赶不上
+#   vsync」这一层卡顿。与 5.4b 的帧率匹配互补，两项都解决才接近无跳帧：
+#     5.4b 修「片源帧率与刷新率不整除」(25fps 在 60Hz 上的 3:2 pulldown)
+#     5.4c 修「合成链路本身因 GPU 低频而超时、错过 vsync」
+#
+#   【为什么需要】ro.ardbeg.sf_hwc_off=1（厂商 hwcomposer.tegra.so 的
+#   glcomposer 在 7.1 上 SIGSEGV，见 5.4 节），1920x1080 全屏画面全部由
+#   SurfaceFlinger 用 GLES 合成，GPU 成了每帧出图的必经路径。但
+#   nvhost_podgov 默认 load_target=700，actmon 把「等 vsync」算成空闲，
+#   播放 25fps 片源时 load 平均只有 372/1000，governor 判定「不忙」，
+#   GPU 长期停在 72~180MHz（max 852MHz 一次都没上过）；同时
+#   gr_idle_timeout_default_us=10000 < 60Hz 帧间隔 16.67ms，每帧之间
+#   必进一次 ELPG 电源门控，唤醒后重新升频，单帧合成耗时忽长忽短，
+#   经常赶不上 vsync 截止 -> 帧被推迟 -> desiredPresentTime 出现 83.3ms
+#   的「跳过一帧」。
+#
+#   【A/B 实测，同一 25.000fps 本地片 / 同一 60Hz / 同一指标】
+#     原厂默认          跳帧(83.3ms) 14.6%  理想帧(40ms) 81.6%
+#                       上屏延迟 46.5ms  GPU 均频  75.6MHz  解码 24.21fps
+#     应用三项参数后    跳帧(83.3ms)  6.8%  理想帧(40ms) 93.2%
+#                       上屏延迟 32.4ms  GPU 均频 102.6MHz  解码 25.10fps
+#     两轮解码速率/丢帧增量完全相同 -> 改善来自合成/上屏链路，不是解码能力
+#     （media_codecs.xml 里 H.264 只有 ffmpeg/google 软解，但 720p/25fps 够用）。
+#   三项写入值都在 debugfs，重启即丢，所以做成开机 init 服务：
+#     scaling/load_target            700   -> 300
+#     scaling/use_throughput_hint      0   -> 1
+#     gr_idle_timeout_default_us   10000   -> 50000
+#   哪些节点可写/写不动、参数含义、风险与开关，详见
+#   initfiles/ardbeg_gpu_video.sh 头部注释与 zz-ardbeg-gpu-video.rc。
+#
+#   默认开（persist.ardbeg.gpu_video=1），置 0 恢复原厂三项默认值。
+include $(CLEAR_VARS)
+LOCAL_MODULE       := zz-ardbeg-gpu-video.rc
+LOCAL_MODULE_TAGS  := optional eng
+LOCAL_MODULE_CLASS := ETC
+LOCAL_SRC_FILES    := zz-ardbeg-gpu-video.rc
+LOCAL_MODULE_PATH  := $(TARGET_OUT)/etc/init
+include $(BUILD_PREBUILT)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE       := ardbeg_gpu_video.sh
+LOCAL_MODULE_TAGS  := optional eng
+LOCAL_MODULE_CLASS := EXECUTABLES
+LOCAL_SRC_FILES    := ardbeg_gpu_video.sh
 LOCAL_MODULE_PATH  := $(TARGET_OUT)/bin
 include $(BUILD_PREBUILT)
 

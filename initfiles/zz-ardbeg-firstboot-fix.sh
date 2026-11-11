@@ -359,6 +359,42 @@ wait
 log "provisioned / lockscreen flags set"
 
 # ---------------------------------------------------------------------------
+# 4c) [2026-11-09 新增] captive portal 校验改走 HTTP，修「WiFi 显示断网」
+#
+#    症状：状态栏 WiFi 图标带「断网」标记，但实际完全能上网
+#    （实测同一时刻还在跑 296 KB/s 的视频流）。
+#
+#    根因（NetworkMonitor.java:293）：
+#        mUseHttps = Settings.Global.getInt(mContext.getContentResolver(),
+#                Settings.Global.CAPTIVE_PORTAL_USE_HTTPS, 1) == 1;
+#    默认值是 **1**，即强制走 HTTPS；而默认 HTTPS 探测地址是
+#        https://www.google.com/generate_204
+#    国内不可达。实测：
+#        PROBE_HTTP http://connectivitycheck.gstatic.com/generate_204 ret=204  ← 通过
+#        Probably not a portal: java.net.SocketTimeoutException: connect timed out
+#        WifiStateMachine: NETWORK_STATUS_UNWANTED_VALIDATION_FAILED            ← 整体判失败
+#    也就是 HTTP 那一步明明是 204，但 HTTPS 超时让整体判失败，UI 就打「断网」。
+#
+#    【必须写在 WiFi 连上之前】mUseHttps 只在 NetworkMonitor **构造时**
+#    读一次，而 NetworkMonitor 是随 NetworkAgent 创建、即随 WiFi 连上创建的。
+#    本脚本第 9 节才开 WiFi，所以这里（第 4 节）写设置刚好赶在前面。
+#    光改设置而不让 NetworkMonitor 重建（WiFi 重连）是不会生效的 —— 见第 10 节。
+#
+#    【为什么不用国内地址】本机实测 connectivitycheck.gstatic.com 解析到
+#    220.181.174.34（国内 CDN），HTTP 返回 204 正常，所以沿用默认 HTTP 地址；
+#    只把 HTTPS 这一层关掉。若将来该地址不通，改这一行即可，候选：
+#        http://connect.rom.miui.com/generate_204
+#        http://connectivitycheck.platform.hicloud.com/generate_204
+#
+#    这两条是 Settings.Global，存在 settings.db 里，重启不丢；
+#    四清之后本脚本会重新写一遍。同样必须 timeout 30（settings 是 app_process）。
+# ---------------------------------------------------------------------------
+timeout 30 settings put global captive_portal_use_https 0 >/dev/null 2>&1 &
+timeout 30 settings put global captive_portal_http_url http://connectivitycheck.gstatic.com/generate_204 >/dev/null 2>&1 &
+wait
+log "captive portal: use_https=0, http probe (fix wifi 'no internet' badge)"
+
+# ---------------------------------------------------------------------------
 # 4b) 关掉全部窗口/过渡/动画时长缩放（黑屏根因 (3)，见头部「问题 4」）
 #     不关的话 SurfaceFlinger 里窗口淡入 layer 的 alpha 会卡在 0x00：
 #     窗口即使 mViewVisibility=0x0、mHaveFrame=true，合成出来依然全黑。
@@ -617,3 +653,62 @@ else
     log "wifi enabled but not associated yet; supplicant will keep scanning"
 fi
 log "connectivity fix done"
+
+# ---------------------------------------------------------------------------
+# 10) [2026-11-09 新增] 复查 captive portal 校验结果，必要时强制重连
+#
+#    第 4c 节已经把 use_https 写成 0，但那只对**之后新建**的 NetworkMonitor
+#    生效。如果 WiFi 在第 4c 之前就已经连上（dirty flash、或用户开机后
+#    手动开过 WiFi 再重启服务），当前这个 NetworkMonitor 用的还是旧值，
+#    校验仍然会失败，状态栏仍然显示「断网」。
+#
+#    所以这里做一次判据 + 兜底：
+#      - 已经 validated{true}：什么都不做（绝不多余断一次网）
+#      - 连着但没 validated：关掉再开一次 WiFi，让 NetworkMonitor 重建
+#
+#    【判据只看 WIFI 那一条】dumpsys connectivity 会列出所有 NetworkAgent
+#    （本机还有 mobile），随便 grep lastValidated{false} 会被别的网络误伤。
+#    WIFI 那条 NetworkAgentInfo 是一整行，里面同时有 type: WIFI[] 和
+#    lastValidated{...}，所以先 grep -m1 'type: WIFI' 收窄再判。
+#
+#    【为什么不用 settings get 复查】settings 是 app_process 起 ART VM，
+#    要十几秒且写完不退出，用 dumpsys 零额外进程。
+# ---------------------------------------------------------------------------
+wifi_connected() {
+    dumpsys wifi 2>/dev/null \
+        | grep -m1 'mNetworkInfo' | grep -q 'CONNECTED/CONNECTED'
+}
+
+# 只看 WIFI 这一条 NetworkAgentInfo 的 lastValidated。
+# 注意 everValidated 是「历史上有过」，lastValidated 才是「当前这次」，
+# 重连之后必须用 lastValidated 判断。
+wifi_validated() {
+    dumpsys connectivity 2>/dev/null \
+        | grep -m1 'type: WIFI' | grep -q 'lastValidated{true}'
+}
+
+if wifi_connected; then
+    if wifi_validated; then
+        log "captive portal: wifi validated (no 'no internet' badge)"
+    else
+        log "wifi connected but NOT validated -> revalidate by wifi reconnect"
+        svc wifi disable >/dev/null 2>&1
+        sleep 3
+        svc wifi enable >/dev/null 2>&1
+        k=0
+        while [ $k -lt 20 ]; do
+            sleep 2
+            if wifi_connected && wifi_validated; then
+                break
+            fi
+            k=$((k+1))
+        done
+        if wifi_validated; then
+            log "captive portal: validated after reconnect ($((k*2))s)"
+        else
+            log "WARN: wifi still not validated after $((k*2))s (badge may persist)"
+        fi
+    fi
+else
+    log "wifi not connected yet, skip captive portal check"
+fi

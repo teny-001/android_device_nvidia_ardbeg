@@ -1,0 +1,58 @@
+# ============================================================================
+# zz-ardbeg-gpu-video.rc —— 开机应用「视频播放 GPU 调频」
+#
+# 它做什么：
+#   开机完成后跑一次 /system/bin/ardbeg_gpu_video.sh，把
+#     /sys/kernel/debug/gk20a.0/scaling/load_target          700 -> 300
+#     /sys/kernel/debug/gk20a.0/scaling/use_throughput_hint  0   -> 1
+#     /sys/kernel/debug/gk20a.0/gr_idle_timeout_default_us   10ms-> 50ms
+#   三项写进去。这三项是 sysfs/debugfs，重启即丢，必须每次开机重写。
+#
+#   原因与实测数据（同一 25.000fps 本地片、同一 60Hz）：
+#     原厂默认下 GPU 均频仅 75.6MHz、desired 跳帧 14.6%、上屏延迟 46.5ms；
+#     应用后 GPU 均频 102.6MHz、跳帧 6.8%、上屏延迟 32.4ms。
+#     详见 ardbeg_gpu_video.sh 头部注释。
+#
+# 为什么用 service 而不是 `on boot` 里直接 write：
+#   这三项都在 /sys/kernel/debug/gk20a.0/ 下，debugfs 在 on post-fs 阶段
+#   才挂载，on boot 时路径可能还不存在，write 会静默失败。
+#   挂到 sys.boot_completed=1 最稳，而且脚本里对每个节点都做了
+#   `[ -e ]` 判断，缺节点只记日志、不阻塞开机。
+#
+# 为什么写 oneshot（关键，别删）：
+#   这是一次性设置，跑完就该退出。Android init 对**非 oneshot** 服务
+#   是「退出即重启」的语义（system/core/init/service.cpp:96-124 Reap），
+#   本项目 ardbeg_fps_match 就踩过这个坑：非 oneshot + 脚本正常 exit 0
+#   -> init.svc 一直 restarting、每 5 秒 fork 一次、dmesg 刷屏。
+#   oneshot 退出时 init 会置 SVC_DISABLED，不会重启。
+#
+# 为什么写 seclabel u:r:init:s0（关键，别删）：
+#   args_[0]=/system/bin/sh 对应 shell_exec:s0，原厂 4.4.4 policy 里
+#   没有 init -> shell_exec 的 process transition，ComputeContext() 会
+#   算出 scon==mycon，于是每次启动刷一条
+#     "Service ardbeg_gpu_video does not have a SELinux domain defined."
+#   （system/core/init/service.cpp:347-380）。setexeccon() 失败会
+#   _exit(127)，所以必须选策略里真实存在的域 —— 与项目里
+#   zz-persist-log.rc / zz-ardbeg-fps-match.rc 一致，用 u:r:init:s0。
+#
+# 为什么不写 class 自动拉起、而要 disabled + 属性触发：
+#   不写 disabled 的话它会跟着 class late_start 自动起，可能早于
+#   debugfs 挂载和属性载入；自己控制时机更稳。
+#
+# 开关：persist.ardbeg.gpu_video（system.prop 里默认 1）
+#   1 = apply（应用修改值）
+#   0 = restore（写回原厂三项默认值，等效于没装这个功能）
+#   运行时也可直接 `ardbeg_gpu_video.sh apply|restore|status`。
+#
+# 命名 zz- 前缀：init 按文件名排序加载 rc，zz- 保证排在其它 rc 之后。
+# ============================================================================
+service ardbeg_gpu_video /system/bin/sh /system/bin/ardbeg_gpu_video.sh
+    class late_start
+    user root
+    group root system
+    seclabel u:r:init:s0
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start ardbeg_gpu_video

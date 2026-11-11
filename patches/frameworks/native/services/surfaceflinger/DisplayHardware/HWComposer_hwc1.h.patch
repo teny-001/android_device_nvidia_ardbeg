@@ -1,0 +1,35 @@
+--- a/frameworks/native/services/surfaceflinger/DisplayHardware/HWComposer_hwc1.h
++++ b/frameworks/native/services/surfaceflinger/DisplayHardware/HWComposer_hwc1.h
+@@ -295,6 +295,32 @@
+     float getDpiX(int disp) const;
+     float getDpiY(int disp) const;
+     nsecs_t getRefreshPeriod(int disp) const;
++
++    /*
++     * 【ardbeg 帧率匹配 2026-11-10】直接改写主显示的刷新周期缓存。
++     *
++     * 为什么需要这个接口：
++     *   本机的显示模式由 tegra DC 决定，可以切到 50Hz / 25Hz / 24Hz
++     *   （/sys/class/graphics/fb0/modes 里有 D:1920x1080p-50 / -25 / -24）。
++     *   但厂商 hwcomposer.tegra.so 的 getDisplayAttributes() **永远返回
++     *   60Hz** —— 它自己缓存了一个固定值，不看 DC 实际模式。于是
++     *   queryDisplayProperties() 填进 mDisplayData[].configs[].refresh 的
++     *   一直是 16666650ns，SurfaceFlinger 的 DispSync 也就永远按 60Hz 排帧。
++     *
++     *   25fps 片源在 60Hz 上只能排成 2,3,2,3,2 个 vsync（平均 2.4），
++     *   这就是肉眼看到的 3:2 pulldown 抖动，再怎么优化解码/合成都没用。
++     *
++     * 谁调用：
++     *   SurfaceFlinger 的 binder 命令 1040（见 SurfaceFlinger_hwc1.cpp）。
++     *   只改这里的缓存是不够的，还要同时：
++     *     a) 把 tegra DC 的模式切过去
++     *        echo D:1920x1080p-50 > /sys/class/graphics/fb0/mode
++     *     b) 调 mPrimaryDispSync.setPeriod() 让 DispSync 也切
++     *   三件事由 device/nvidia/ardbeg/initfiles/ardbeg_fps_match.sh 一起做。
++     *   顺序不能错：先切 DC 模式，再调 1040；否则 SF 按新周期排帧、
++     *   硬件还在旧刷新率，画面会错拍得更厉害。
++     */
++    void setRefreshPeriod(int disp, nsecs_t period);
+     android_color_mode_t getColorMode(int disp) const;
+ 
+     const Vector<DisplayConfig>& getConfigs(int disp) const;

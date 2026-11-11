@@ -72,15 +72,10 @@
       输出开关全关、音量给安全值，等具体路由时再按需打开。
       取值来源：nvaudio_conf.xml 中 alsa_device name="music" 下那个无 name 的 path。
     -->
-    <mixer card="tegra-snd-rt5639">
+    <mixer card="Tegra">
         <init>
-            <ctl name="Speaker Playback Volume" val="0x20"/>
-            <ctl name="HP Playback Volume" val="0x1e"/>
-            <ctl name="Headphone Jack Switch" val="0"/>
-            <ctl name="Int Spk Switch" val="0"/>
-            <ctl name="Int Mic Switch" val="0"/>
-            <ctl name="Mic Jack Switch" val="0"/>
-            <ctl name="Codec VMixer Codec Switch" val="1"/>
+            <!-- HDA HDMI: 打开 IEC958 输出开关，这是 HDMI 出声的必要条件 -->
+            <ctl name="IEC958 Playback Switch" val="1"/>
         </init>
     </mixer>
 
@@ -91,6 +86,13 @@
         Int Spk Switch          : 内部扬声器功放使能，必须最后开，否则有 pop 音
       官方 off 路径只关 Int Spk Switch、保留 SPK MIXR 连接，这里照抄，
       避免关断时序引起爆音。
+    -->
+    <!--
+      【以下 <device> 路由已失效 2026-11-10】
+      这些路径里的控件名都是 RT5639 codec 的，本机没有这颗芯片，
+      card 0（HDA HDMI）上也没有同名控件。apply_device_path_l() 找不到
+      控件只告警不失败，所以留着无害，但**不要**以为它们在起作用。
+      HDMI 输出是一条固定通路，不需要 mixer 路由。
     -->
     <device name="speaker">
         <path name="on">
@@ -229,21 +231,49 @@
       device 的 on/off 了，不需要额外的流级路径。
     -->
     <!--
-      【恢复 RT5639 主输出 2026-11-04】
-        旧版把主输出临时改接 HDMI card 0/device 3；这只能把声音送到 HDMI，
-        平板内置扬声器和耳机不会出声。原因是旧内核的 ARM LPAE 配置没有
-        Tegra 32-bit DMA zone，导致 tegra_pcm_new() 为 I2S 分配 coherent DMA
-        缓冲时以 -ENOMEM 失败，RT5639 声卡未注册。现在内核配置为 Tegra124
-        选择 ZONE_DMA，且 boot kernel 将包含 P1761/1470 的 RT5639 DTB；
-        所以主输出恢复到官方 RT5639 codec 的 card/device 0。
+      【主输出 = HDMI 2026-11-10】
 
-        card 名来自 /proc/asound/cards 的 ASoC 声卡注册名；audio_config.c
-        会将其解析为动态 ALSA card index，避免假定它永远是 card 0 或 1。
-        扬声器/耳机 mixer 路由继续使用上方的 RT5639 控件定义。
+      历史：2026-11-04 曾把主输出从 HDMI 改回 RT5639 的 card/device 0，
+      当时的理由是「HDMI 只能出声到电视，平板扬声器和耳机没声音」，
+      并归因于内核缺 Tegra 32-bit DMA zone 导致 tegra_pcm_new() -ENOMEM。
+
+      2026-11-10 实测把这个前提推翻了：
+        1. 本机**没有**模拟音频 codec。RT5639 挂在 i2c-0@0x1c，
+           用 /sys/bus/i2c/devices/i2c-0/new_device 实例化后，
+           dmesg 反复打 "tegra-i2c tegra12-i2c.0: no acknowledge
+           from address 0x1c"。芯片不应答 = 硬件不在。
+           （陷阱：rt5639_i2c_probe 在 I2C 全 NAK 时仍会注册 codec，
+             /sys/kernel/debug/asoc/codecs 里能看到 rt5639.0-001c，
+             看起来像成功，其实全是假的。）
+        2. 所以 tegra-snd-rt5639 这张卡**永远不会**注册，
+           card="tegra-snd-rt5639" 只会被 card_index_from_attr()
+           静默退回 card 0，然后去开 /dev/snd/pcmC0D0p ——
+           那个设备不存在（card 0 只有 device 3 的 HDMI），
+           于是每秒刷 "pcm_open(out) failed: cannot open device
+           '/dev/snd/pcmC0D0p'"。
+        3. 剩下的 -ENOMEM 是另一回事：即使 codec 存在，
+           tegra30-i2s.1 也会因 "coherent DMA mask 0xffffffff is smaller
+           than system GFP_DMA mask" 而 pcm constructor failed: -12。
+
+      结论：唯一能出声的出口就是 HDMI。card 0 = HDA NVIDIA Tegra，
+      device 3 = HDMI 0，实测 48000Hz/2ch/S16_LE 可以 RUNNING。
+
+      card 名用 "Tegra"：card_index_by_name() 在 /proc/asound/cards
+      整行做子串匹配，第一行就是 " 0 [Tegra ...] : HDA-Intel - HDA
+      NVIDIA Tegra"，能命中；用名字而不是写死 0，是为了声卡序号变化时
+      不至于静默开错设备。
+
+      下面 <device> 里的 RT5639 控件（Speaker Playback Volume /
+      Int Spk Switch / Headphone Jack Switch ...）现在全部是**死的**：
+      card 0 上不存在这些控件，apply_device_path_l() 会打
+      "Control 'xxx' not found" 然后跳过。留着它们不影响 PCM 打开
+      （apply_route 仍然会把 current_devices 置上，out_pcm_write
+      才不会因为「没有任何路由」而直接丢数据），
+      HDMI 也不需要 DAPM 路由，所以先不动。
     -->
-    <stream type="pcm" dir="out" card="tegra-snd-rt5639" device="0"
+    <stream type="pcm" dir="out" card="Tegra" device="3"
             rate="48000" period_size="512" period_count="4"/>
-    <stream type="pcm" dir="in"  card="tegra-snd-rt5639" device="0"
+    <stream type="pcm" dir="in"  card="tegradummy" device="0"
             rate="48000" period_size="512" period_count="4"/>
 
 </audiohal>

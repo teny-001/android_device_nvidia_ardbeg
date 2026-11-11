@@ -1,0 +1,54 @@
+#!/bin/bash
+# =============================================================================
+# xmllint 替身 —— 只用 python3 做「XML 是否合法」这一件事
+#
+# 【为什么需要它】
+#   build/core/definitions.mk 第 2614 行，copy-xml-file-checked 规则：
+#       $(hide) xmllint $$< >/dev/null  # Don't print the xml file to stdout.
+#   全树只有这一处用 xmllint，作用就是在拷贝 XML 到 system/ 之前确认它
+#   格式合法。本机没有装 libxml2-utils，于是构建在 58% 处报：
+#       /bin/bash: 行 1: xmllint: 未找到命令
+#   而装包需要 sudo 密码，非交互环境给不出来。
+#
+# 【为什么不用 apt 装】
+#   本项目约定「源码树零改动 + 不改动宿主系统」。tools/hostbin 已经用同样
+#   的办法顶替了 flex（见同目录 flex），这里沿用同一套路。
+#
+# 【行为】
+#   * 忽略所有以 - 开头的选项（构建只用最基本的调用形式）；
+#   * 对每个文件用 ElementTree 解析一遍，合法则静默退出 0；
+#   * 不合法则把文件名和解析错误写到 stderr，退出 1 —— 与真 xmllint 的
+#     失败语义一致，构建会在同一处停下并给出可读原因。
+#   真 xmllint 默认会把文档打到 stdout，构建那边重定向到了 /dev/null，
+#   所以这里不需要输出文档内容。
+# =============================================================================
+
+_PY=
+for _p in /usr/bin/python3 /usr/local/bin/python3 /bin/python3; do
+    if [ -x "$_p" ]; then
+        _PY=$_p
+        break
+    fi
+done
+if [ -z "$_PY" ]; then
+    echo "xmllint wrapper: 找不到 python3（试过 /usr/bin /usr/local/bin /bin）" >&2
+    exit 127
+fi
+
+exec "$_PY" -c '
+import sys
+import xml.etree.ElementTree as ET
+
+files = [a for a in sys.argv[1:] if not a.startswith("-")]
+if not files:
+    sys.exit(0)
+
+rc = 0
+for f in files:
+    try:
+        ET.parse(f)
+    except Exception as e:
+        sys.stderr.write("%s: %s\n" % (f, e))
+        rc = 1
+sys.exit(rc)
+' "$@"

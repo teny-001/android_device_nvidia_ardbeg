@@ -6,8 +6,8 @@
 
 ```make
 BOARD_SEPOLICY_DIRS += \
-    device/nvidia/shield-common/sepolicy/common \
-    device/nvidia/shield-common/sepolicy/lineage-common \
+    device/nvidia/ardbeg/shield-common/sepolicy/common \
+    device/nvidia/ardbeg/shield-common/sepolicy/lineage-common \
     device/nvidia/ardbeg/sepolicy
 ```
 
@@ -71,6 +71,6 @@ allow hostapd wifi_data_file:lnk_file read;
 ## 如果以后发现丢了某条策略
 
 先在这个目录里 `grep` 找原始规则，再对照
-`device/nvidia/shield-common/sepolicy/common/` 里同名文件确认是不是已经有了。
+`device/nvidia/ardbeg/shield-common/sepolicy/common/` 里同名文件确认是不是已经有了。
 **确认没有**才往 `device/nvidia/ardbeg/sepolicy/comms.te` 里加，
 并且**只加 allow，不要加 type 声明**。

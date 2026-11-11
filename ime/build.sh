@@ -18,13 +18,15 @@
 #   本项目的代码没有用 lambda / default method，降到 1.7 无损失。
 #
 # 必须在宿主机执行（容器里没有 java）：
-#   flatpak-spawn --host bash "/home/dy/WorkBuddy AI/ardbeg-cm-14.1/mini-ime/build.sh"
+#   flatpak-spawn --host bash <源码树根>/device/nvidia/ardbeg/ime/build.sh
 # =============================================================================
 set -e
 
-SRC_TREE="/home/dy/WorkBuddy AI/2026-10-23-16-34-21/aosp-src"
 # 脚本自己所在的目录（设备树里的 ime/）。这样把整个 ime/ 目录搬走也能编。
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# 源码树根：ime/ 往上 4 层（ime -> ardbeg -> nvidia -> device -> <top>）。
+# 可用 SRC_TREE=... 覆盖。
+SRC_TREE="${SRC_TREE:-$(cd "$HERE/../../../.." && pwd)}"
 
 AAPT="$SRC_TREE/prebuilts/sdk/tools/linux/bin/aapt"
 DX_JAR="$SRC_TREE/prebuilts/sdk/tools/lib/dx.jar"

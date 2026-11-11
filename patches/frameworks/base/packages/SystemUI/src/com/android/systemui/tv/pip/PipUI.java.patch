@@ -1,0 +1,50 @@
+--- a/frameworks/base/packages/SystemUI/src/com/android/systemui/tv/pip/PipUI.java
++++ b/frameworks/base/packages/SystemUI/src/com/android/systemui/tv/pip/PipUI.java
+@@ -35,11 +35,45 @@
+         PackageManager pm = mContext.getPackageManager();
+         mSupportPip = pm.hasSystemFeature(FEATURE_PICTURE_IN_PICTURE)
+                 && pm.hasSystemFeature(FEATURE_LEANBACK);
++        // ====================================================================
++        // 【ardbeg 修复 2026-11-10】initialize() 必须无条件执行
++        // ====================================================================
++        //   本机（ardbeg / TN8）声明了 android.software.leanback，但**没有**
++        //   android.software.picture_in_picture，所以 mSupportPip 恒为 false。
++        //   而 UiModeManagerService 只要 hasSystemFeature(FEATURE_LEANBACK)
++        //   就把 UI 模式判成 UI_MODE_TYPE_TELEVISION，Recents.start() 于是选
++        //   RecentsTvImpl -> RecentsTvActivity（TV 版最近任务）。
++        //
++        //   那个 Activity 在 onCreate 里直接取：
++        //       PipManager.getInstance().getRecentsFocusedPipBounds().width()
++        //       PipManager.getInstance().getPipRecentsOverlayManager()
++        //   这两个对象都只在 PipManager.initialize() 里创建。原来的写法
++        //   （if (!mSupportPip) return; 之后再 initialize）让它们永远是 null。
++        //
++        //   实测后果（2026-11-09 23:48，按导航栏「最近任务」键）：
++        //     E AndroidRuntime: FATAL EXCEPTION: main
++        //     E AndroidRuntime: java.lang.NullPointerException: Attempt to
++        //         invoke virtual method 'int android.graphics.Rect.width()'
++        //         on a null object reference
++        //     E AndroidRuntime:   at RecentsTvActivity.onCreate(RecentsTvActivity.java:321)
++        //   连崩两次后 AMS 直接杀进程：
++        //     W ActivityManager: Process com.android.systemui has crashed too
++        //         many times: killing!
++        //   ImageWallpaper 与 SystemUI 同进程，一起死 ->
++        //     W WallpaperManagerService: Wallpaper service gone
++        //     W WallpaperManagerService: Reverting to built-in wallpaper!
++        //   -> clearWallpaperLocked() 删掉 /data/system/users/0/wallpaper ->
++        //   之后每次开机 systemReady() 都因「无源图 -> 无裁剪图」再清一次，
++        //   桌面**永久纯黑**，重启也回不来（只剩时钟和 Dock）。
++        //
++        //   在无 PIP 的设备上 initialize() 是安全的：
++        //     getPinnedStackInfo() == null -> resizePinnedStack(STATE_NO_PIP)
++        //     -> mCurrentPipBounds = null -> resizeStack() 本身有 try/catch
++        //   且 isPipShown() 恒为 false，PIP 功能仍然由 mSupportPip 关掉。
++        PipManager.getInstance().initialize(mContext);
+         if (!mSupportPip) {
+             return;
+         }
+-        PipManager pipManager = PipManager.getInstance();
+-        pipManager.initialize(mContext);
+     }
+ 
+     @Override

@@ -294,9 +294,38 @@ PRODUCT_PACKAGES += \
     bootanim_killer.sh \
     zz-sf-hwc-off.rc \
     sf_hwc_off.sh \
+    ardbeg_fps_match.sh \
+    zz-ardbeg-fps-match.rc \
+    ardbeg_gpu_video.sh \
+    zz-ardbeg-gpu-video.rc \
     zz-ardbeg-media-watchdog.rc \
     ardbeg_media_watchdog.sh
 
+# ============================================================================
+# 【新增 2026-11-11】视频播放 GPU 调频 —— 上面 PRODUCT_PACKAGES 里新增的
+#   ardbeg_gpu_video.sh / zz-ardbeg-gpu-video.rc
+#
+#   为什么必须进 PRODUCT_PACKAGES：initfiles/Android.mk 里的 BUILD_PREBUILT
+#   只是「声明有这个模块」，不被 PRODUCT_PACKAGES 引用就不会被安装进
+#   /system。本项目在「四清专项」里踩过这个坑：只有定义没引用，历次
+#   重打包出来的 zip 和设备上都找不到文件（见下面 5.5 节注释）。
+#
+#   落点：
+#     ardbeg_gpu_video.sh      -> /system/bin/
+#     zz-ardbeg-gpu-video.rc   -> /system/etc/init/  (oneshot)
+#
+#   作用：开机把 GPU devfreq 三项 debugfs 参数从原厂默认改成
+#     load_target 700->300 / use_throughput_hint 0->1 /
+#     gr_idle_timeout 10ms->50ms，让「关掉 HWC 后由 SF GLES 合成」
+#   时 GPU 不再被压在最低档、不再每帧进 ELPG 电源门控。
+#   A/B 实测（25.000fps 本地片 / 60Hz）：跳帧 14.6%->6.8%、
+#   理想帧 81.6%->93.2%、上屏延迟 46.5ms->32.4ms、GPU 均频
+#   75.6->102.6MHz；解码侧两轮不变 -> 瓶颈在合成/上屏而非解码能力。
+#   详见 initfiles/Android.mk 5.4c 节、ardbeg_gpu_video.sh 头部、
+#   zz-ardbeg-gpu-video.rc，以及 system.prop 的 GPU 开关注释。
+#
+#   开关 persist.ardbeg.gpu_video 默认 1，置 0 恢复原厂三项默认值。
+# ============================================================================
 # ============================================================================
 # 【新增 2026-11-06 四清专项】首次开机收尾 + 桌面/显示常驻守护
 # ============================================================================
