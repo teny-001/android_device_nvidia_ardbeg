@@ -75,6 +75,40 @@ service sf_hwc_off /system/bin/sh /system/bin/sf_hwc_off.sh
     class late_start
     user root
     group root system
+    # 【2026-11-12 补齐 seclabel u:r:init:s0 —— 消除 init 的 SELinux 域告警】
+    # 背景：11-12 重启后抓到的内核日志共 35 条
+    #   "init: Service <name> does not have a SELinux domain defined."，
+    #   sf_hwc_off 是本项目自己加的服务里唯一漏写 seclabel 的一个；同批的
+    #   ardbeg_gpu_video / ardbeg_fps_match / persist_logcat 都带了
+    #   seclabel u:r:init:s0、不在告警清单。逐服务核对 init.svc 全部正常，
+    #   可见 Permissive 下这条告警只是记录、不影响功能，但属一致性欠账。
+    #
+    # 原理（system/core/init/service.cpp:347-380）：
+    #   未写 seclabel 时 init 调 ComputeContext() 算进程域。本服务
+    #   args_[0]=/system/bin/sh，标签 shell_exec:s0 是原厂 4.4.4 policy
+    #   认识的类型，计算能成功，但策略里没有 init -> shell_exec 的
+    #   process transition，于是 scon==mycon -> init 打印上面那条告警，
+    #   并以 init 自身域 fork（服务照样 running，这正是 zz-persist-log.rc
+    #   里「不加 seclabel 也能 running」的对照组解释）。
+    #   写了 seclabel 后 init 走 347-348 行短路分支，不再调用
+    #   ComputeContext()，告警随之消失。
+    #
+    # 为什么选 u:r:init:s0（与同目录三个 rc 完全一致）：
+    #   * 该域在原厂 4.4.4 sepolicy 里真实存在（logd 就跑在该域）；
+    #     写不存在的域会让 setexeccon() 失败并 _exit(127)。
+    #   * 未加 seclabel 时服务本就继承 init 域，加了以后域不变，
+    #     语义等价「不切域」，权限既不缩小也不放大 —— 对脚本里的
+    #     `service call SurfaceFlinger 1008 i32 1` 没有任何影响。
+    #   * init 域权限最宽，无需为脚本补 allow 规则。
+    #
+    # 落地 / 回退 / 规范：
+    #   设备侧按铁律 mount -o rw,remount /system 后 cp -> chmod/chown ->
+    #   mv 换 inode（不原地覆盖），再 restorecon 校正 system_file:s0，
+    #   最后 adb reboot 验证告警消失、服务仍 running、显示正常。
+    #   回退只需删掉下面这一行 seclabel；改动前后备份见 wb_tmp/。
+    #   编译产物 out/.../SYSTEM/etc/init/ 会在下次 make otapackage 同步。
+    #   本改动只涉及设备树 rc，按项目规范无需新增 cm14.1 源码 patch。
+    seclabel u:r:init:s0
     disabled
 
 on post-fs

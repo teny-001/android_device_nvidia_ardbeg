@@ -86,7 +86,38 @@ BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
 # androidboot.hardware=ardbeg 决定 init 去加载 /init.ardbeg.rc，缺了系统没有服务。
 # androidboot.selinux=permissive：本板没有可用的 7.1 sepolicy 全集，
 #   先用宽容模式把系统跑起来，再逐条补策略（见 sepolicy/README.md）。
-BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive androidboot.hardware=ardbeg
+# ---------------------------------------------------------------------------
+# 【2026-11-12 长日志内核：在内核 cmdline 追加 log_buf_len=1M】
+# 目的：把内核 printk 的环形缓冲（dmesg 读的就是它）由默认 128KB 扩到 1MB，
+#       让 `adb shell dmesg` 在开机后能直接看到接近 0 秒的内核日志。
+# 背景：本机 3.10.24 内核默认 log_buf 约 128KB（实测上限 904 行 / 128586 字节），
+#       开机前 ~13s 的密集驱动日志就会写满并覆盖最早的 0~6s；而 adbd 要
+#       uptime≈16s 才可用，所以 adb 侧 dmesg 最早只能抓到 5.2~6.7s。
+#       此前只能靠 /sys/fs/pstore/console-ramoops 拿「上一次启动」从
+#       0.000000s 开始的 console 日志（ramoops 1MB @0xf2300000），但它是
+#       read-once 且必须再重启一次才落盘，无法用于当前启动的实时诊断。
+# 依据：设备 /proc/kallsyms 存在 log_buf_len_setup / setup_log_buf 两个符号，
+#       证明该内核注册了 early_param("log_buf_len") 并支持运行时用 bootmem
+#       分配更大的 log_buf；1M 是 3.10 时代 Android 设备的通用取值。
+# 安全性：log_buf_len 只影响 printk 缓冲大小，不参与内存映射，不会覆盖
+#       bootloader 从 NCT/DTB 追加的 mem= / vpr= / tegra_fbmem= / gpt /
+#       board_info 等参数，因此不触发上方第 84~85 行「写死会覆盖内存映射
+#       导致起不来」的警告。完整 /proc/cmdline = 本行 + buildvariant=
+#       （build/core/Makefile:553 自动追加）+ bootloader 段；实测原 799 字节，
+#       加完约 815 字节，远低于 ATAG/DT cmdline 的 1024/2048 上限。
+# 构建链路：BOARD_KERNEL_CMDLINE 会同时传给 boot.img / recovery.img 与
+#       OTA 包里的 cmdline 文件（build/core/Makefile:555 / 1017 / 1461 /
+#       1922 / 1963），所以改这一行即可让今后所有编译产物自带长日志。
+# 落地边界：本行只影响「未来编译产物」，不影响已刷入的 5002791a80 系统。
+#       立即可用的成品是 wb_tmp/boot_longlog.img：在现成 boot.img 头部
+#       cmdline 字段追加同样 15 字节，kernel/ramdisk/全部地址/img_id
+#       逐字节不变（详见 wb_tmp/report_longlog_boot.txt）。
+#       刷 LNX 前必须 dump + md5 备份 + af.py verify + 用户单独授权。
+# 回退：把本行末尾的 " log_buf_len=1M" 删掉，或还原
+#       wb_tmp/BoardConfig.mk.bak_before_longlog。
+# 规范：本次只改设备树 mk，未改 cm14.1 源码，按项目约定无需新增 patch。
+# ---------------------------------------------------------------------------
+BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive androidboot.hardware=ardbeg log_buf_len=1M
 
 # ============================================================================
 # 三、分区尺寸

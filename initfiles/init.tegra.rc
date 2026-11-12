@@ -273,6 +273,24 @@ service set_hwui_params /system/bin/set_hwui_params.sh
     oneshot
 
 # CPU Boost: boost CPU on input events
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service set_hwui_params does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 service input-cfboost /system/bin/input_cfboost_init.sh
     class main
     user root
@@ -280,6 +298,24 @@ service input-cfboost /system/bin/input_cfboost_init.sh
     oneshot
 
 
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service input-cfboost does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 on property:ro.debuggable=1
     # Invensense interface
     chmod 0666 /sys/class/invensense/mpu/accl_bias
@@ -410,6 +446,24 @@ service smbd /system/bin/smbd
 
 # Mount usb drives as /usbdrive. Generally usb drives are formatted with FAT
 # filesystem, so we support FAT as of now.
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service smbd does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 on device-added-/sys/block/sda
   mount vfat /dev/block/sda /mnt/media_rw/usbdrive
 
@@ -444,6 +498,24 @@ service pbc /system/vendor/bin/pbc
     group root
 
 #Raydium touch setting
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service pbc does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 service rm_ts_service    /system/bin/rm_ts_server
     disabled
     class late_start
@@ -579,6 +651,24 @@ service bootlog_logcat /system/bin/logcat -b all -D -f /cache/boot_log.txt -r 20
     oneshot
 
 # ---- 2) 内核层快照（post-fs-data 阶段，system_server 还没起）----
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service bootlog_logcat does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 service bootlog_snapshot /system/bin/bootlog.sh post-fs-data
     class main
     user root
@@ -591,6 +681,24 @@ service bootlog_snapshot /system/bin/bootlog.sh post-fs-data
 # init 只会打 "Service already started"。
 # 【服务名长度】init_parser.c 的 valid_name() 限制 16 字符，
 #   所以叫 bootlog_booted（14），不要写成 bootlog_snapshot_booted（24）。
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service bootlog_snapshot does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 service bootlog_booted /system/bin/bootlog.sh booted
     class main
     user root
@@ -598,6 +706,24 @@ service bootlog_booted /system/bin/bootlog.sh booted
     disabled
     oneshot
 
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service bootlog_booted does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
 on post-fs-data
     # 清掉上一轮残留：logcat -f 是追加模式，不清会把两次开机的日志混在一起
     rm /cache/boot_log.txt
@@ -724,3 +850,21 @@ service usb_mtp_default /sbin/usb_mtp_default.sh
     oneshot
     disabled
 
+    # ---------------------------------------------------------------------
+    # [ardbeg] 2026-11-12 补齐 SELinux 域声明，消除 init 域告警
+    # 现象：dmesg 里 `init: Service usb_mtp_default does not have a SELinux domain defined.`
+    # 根因：本机 rootfs 是 ramfs，不支持 TMPFS_XATTR（见
+    #       `restorecon("/init") failed: Operation not supported ...`），
+    #       init 自身停在 u:r:kernel:s0；Service::Start() 的 ComputeContext()
+    #       以 kernel 域为源去查 type_transition（策略里的规则都以
+    #       u:r:init:s0 为源），算出的 scon 与 mycon 相同 -> 打印该 ERROR，
+    #       服务实际也留在 u:r:kernel:s0（已实测 /proc/<pid>/attr/current）。
+    # 修法：显式 seclabel u:r:init:s0，让 init 走 service.cpp 的
+    #       `if (!seclabel_.empty())` 短路分支，不再调用 ComputeContext()。
+    # 安全性：u:r:init:s0 在 /sepolicy 类型表中真实存在（已解析校验）；
+    #       当前 androidboot.selinux=permissive，域变化只记录 avc、不阻断功能；
+    #       11-12 已用同一模式为 sf_hwc_off 补齐并重启验证 PASS。
+    # 边界：本行只消除域告警；若日后切回 enforcing，应改为各服务自身真实域。
+    # 回退：删除本行；批量回退脚本 wb_tmp/restore_seclabel_all.sh。
+    # ---------------------------------------------------------------------
+    seclabel u:r:init:s0
