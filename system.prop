@@ -351,3 +351,27 @@ persist.ardbeg.fps_match=0
 #   参数含义、完整 A/B 数据）与 initfiles/Android.mk 5.4c 节。
 # ============================================================================
 persist.ardbeg.gpu_video=1
+
+# ============================================================================
+# [ardbeg] 2026-11-13 修复 hwcomposer INFO 刷屏（四清 /data 后的回归）
+# 现象：厂商 hwcomposer 的 propmonitor_thread 会反复打印
+#       "process event IN_CLOSE_NOWRITE overscan_rate:0 ..."，
+#       在 logcat main 缓冲里可占 28%~99%（11-12 曾实测 99.5%），
+#       把真正有用的调试日志冲掉。
+# 根因：该日志是 INFO 级别。11-12 曾手工 setprop
+#       persist.log.tag.hwcomposer W + stop logd; start logd 修掉，
+#       但 persist.* 属性存于 /data/property，11-13 用户在 TWRP
+#       做四清（wipe /data）后该属性丢失 -> 刷屏回归（01:15 实测 28.5%）。
+# 修法：把该属性作为默认值写进 system.prop（编译进 /system/build.prop）。
+#       init 加载 build.prop 时若 /data/property 无持久值即采用此默认值，
+#       以后再四清也会自动生效；用户手工 setprop 的值仍可覆盖。
+# 生效条件：log.tag.* 过滤规则在 logd 启动时读取，本项是开机默认值，
+#       开机即生效，无需额外 stop/start logd。
+# 验证（01:15 真机）：setprop W + stop logd; start logd 后，
+#       logcat -b main -t 400 的 hwcomposer 行 116/407 (28.5%) -> 0/98 (0.0%)，
+#       写入后读回 = W，PASS。
+# 回退：删除本行，并 setprop persist.log.tag.hwcomposer '' 后重启 logd。
+# 边界：只改日志过滤级别，不改变 hwcomposer 行为；sf_hwc_off=1
+#       （禁用厂商 HWC 合成）仍是防黑屏主保险，勿置 0。
+# ============================================================================
+persist.log.tag.hwcomposer=W

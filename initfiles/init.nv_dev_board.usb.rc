@@ -10,15 +10,46 @@ on init
     # 【修复 2026-11-04】这一行 setprop 永远不会生效，原因见下面 iSerial 处的说明。
     # 保留它没有任何作用，但也不报错，为了不再误导后来的人，直接注释掉。
     # setprop ro.serialno 0123456789ABCDEF
-    setprop ro.product.manufacturer NVIDIA
-    setprop ro.product.model Tegra-Android
-    setprop ro.nv.usb.vid 0x0955
-    setprop ro.nv.usb.pid.mtp 0x701a
-    setprop ro.nv.usb.pid.mtp.adb 0x701b
-    setprop ro.nv.usb.pid.rndis 0x701c
-    setprop ro.nv.usb.pid.rndis.adb 0x701d
-    setprop ro.nv.usb.pid.ptp 0x701e
-    setprop ro.nv.usb.pid.ptp.adb 0x701f
+
+    # ======================================================================
+    # [ardbeg] 2026-11-13 注释掉下面 9 行开发板 setprop（修复内核日志报错
+    #          与 ro.nv.usb.* / ro.product.model 属性值被抢先写错）
+    # 现象（01:15 重抓内核日志，pstore 上一次启动 0 秒全量，共 16 行）：
+    #   [   15.110084] init: property_set("ro.product.model", "ardbeg") failed
+    #   [   15.126038] init: property_set("ro.nv.usb.vid", "0955") failed
+    #   ... ro.nv.usb.pid.* / ro.secure / ro.debuggable / ro.sf.lcd_density 等
+    # 根因：本文件由 init.tegra.rc 第 9 行 import，init.tegra.rc 又由
+    #       init.rc 第 9 行 import，因此 `on init` 阶段这 9 行先执行，
+    #       把只读属性 ro.* 抢先设成 NVIDIA 开发板值：
+    #           ro.product.model = Tegra-Android
+    #           ro.nv.usb.vid   = 0x0955 / ro.nv.usb.pid.* = 0x701a~0x701f
+    #       随后 init 在 late-init 的 load_system_props 里加载
+    #       /system/build.prop（含 device/nvidia/ardbeg/system.prop 的
+    #       正确值 0955 / 7102 / 7100 / 7103 / ardbeg），但 ro.* 属性
+    #       只读、只能设一次 -> 全部被拒绝并打印 ERROR。
+    # 实测（01:15 getprop，修复前）：ro.nv.usb.vid=0x0955、
+    #       ro.nv.usb.pid.mtp=0x701a、ro.nv.usb.pid.mtp.adb=0x701b、
+    #       ro.product.model=Tegra-Android，与 system.prop 正确值完全不同。
+    #       带 0x 前缀的字符串若写进 android_usb/idVendor 会被内核
+    #       "%04x" 解析成 0009 / 0070（见本文件 90~100 行注释，相关
+    #       write 行此前已先行注释规避）。
+    # 修法：注释掉这 9 行，让 build.prop 的正确值成为首次设置并生效。
+    # 影响：纯删除抢先赋值，不关闭任何功能；反而纠正 USB VID/PID 与
+    #       产品型号属性，并消除 16 行 property_set failed。
+    # 生效条件：本文件在 ramdisk（rootfs 为 ramfs），必须重编 boot.img
+    #       或整包 OTA 并刷入 LNX(p9) 才在设备侧生效；当前运行实例里
+    #       ro.* 属性已只读，运行时 setprop 静默失败、无法补救。
+    # 回退：恢复这 9 行（或 git revert 本提交）即可。
+    # ======================================================================
+    # setprop ro.product.manufacturer NVIDIA
+    # setprop ro.product.model Tegra-Android
+    # setprop ro.nv.usb.vid 0x0955
+    # setprop ro.nv.usb.pid.mtp 0x701a
+    # setprop ro.nv.usb.pid.mtp.adb 0x701b
+    # setprop ro.nv.usb.pid.rndis 0x701c
+    # setprop ro.nv.usb.pid.rndis.adb 0x701d
+    # setprop ro.nv.usb.pid.ptp 0x701e
+    # setprop ro.nv.usb.pid.ptp.adb 0x701f
 
 on boot
     # 【修复 2026-11-04】iSerial 改成直接写字面值，不再引用 ${ro.serialno}。
